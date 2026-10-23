@@ -76,12 +76,16 @@ def main():
     shutil.copy(testdata / "d3d11" / "triangle.exe", d3d / "triangle.exe")
     sqlite = testdata / "sqlite3.exe"
     shutil.copy(startup, work / "startup.exe")
-    # Wine initialises a prefix on first use, which takes seconds; Raven needs no such step. Both are measured on a ready prefix, so a
-    # fresh copy of an already initialised Wine prefix is used for every run.
+    # Both runtimes initialise a prefix on first use, which takes seconds. Both are measured on a ready prefix: every run gets a fresh copy
+    # of one that was initialised once, by wineboot for Wine and by a first run of the start-up program for Raven.
     warm = work / "wine-warm"
     warm_env = dict(base, WINEPREFIX=str(warm))
     subprocess.run([str(wine), "wineboot", "-u"], env=warm_env, capture_output=True, timeout=300)
     subprocess.run([str(server), "-k"], env=warm_env, capture_output=True, timeout=60)
+    raven_warm = work / "raven-warm"
+    subprocess.run([str(raven), "--run-process", "--execution=native", "--timeout-ms=300000", str(work / "startup.exe")],
+                   env=dict(base, RAVEN_PREFIX=str(raven_warm)), capture_output=True, timeout=300)
+    warm_prefixes = {"wine": warm, "raven": raven_warm}
     rows, measurements = [], []
     for name, program in (("startup", work / "startup.exe"), ("sqlite", sqlite), ("d3d11", d3d / "triangle.exe")):
         if selected and name not in selected:
@@ -91,8 +95,7 @@ def main():
             for index in range(repeats):
                 prefix = work / f"prefix-{runtime}-{name}-{index}"
                 shutil.rmtree(prefix, ignore_errors=True)
-                if runtime == "wine":
-                    shutil.copytree(warm, prefix, symlinks=True)
+                shutil.copytree(warm_prefixes[runtime], prefix, symlinks=True)
                 env = dict(base)
                 program_args = [str(program)] + ([":memory:", QUERY] if name == "sqlite" else [])
                 if runtime == "raven":
