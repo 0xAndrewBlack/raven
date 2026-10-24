@@ -19,8 +19,17 @@ static struct tls_block template = {17, 0x12345678, 0};
 static struct tls_block *current_tls(void)
 {
 	uintptr_t *slots;
+#ifdef _WIN64
 	__asm__("movq %%gs:0x58,%0" : "=r"(slots));
+#else
+	__asm__("movl %%fs:0x2c,%0" : "=r"(slots));
+#endif
+#ifdef RAVEN_TLS_DLL
 	return (struct tls_block *)slots[_tls_index];
+#else
+	/* Executable TLS access can use slot zero directly, as MSVC does. */
+	return (struct tls_block *)slots[0];
+#endif
 }
 
 static void NTAPI first_callback(PVOID module, DWORD reason, PVOID reserved)
@@ -57,10 +66,17 @@ static void NTAPI second_callback(PVOID module, DWORD reason, PVOID reserved)
 }
 
 static PIMAGE_TLS_CALLBACK callbacks[] = {first_callback, second_callback, 0};
+#ifdef _WIN64
 const IMAGE_TLS_DIRECTORY64 _tls_used __attribute__((section(".rdata$T"))) = {
 	(ULONGLONG)&template, (ULONGLONG)&template + 8,
 	(ULONGLONG)&_tls_index, (ULONGLONG)callbacks, 8, RAVEN_TLS_ALIGN_FLAG
 };
+#else
+const IMAGE_TLS_DIRECTORY32 _tls_used __attribute__((section(".rdata$T"))) = {
+	(DWORD)&template, (DWORD)&template + 8,
+	(DWORD)&_tls_index, (DWORD)callbacks, 8, RAVEN_TLS_ALIGN_FLAG
+};
+#endif
 
 #ifdef RAVEN_TLS_DLL
 __declspec(dllexport) DWORD ReadTLSValue(void)
@@ -86,8 +102,10 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved)
 	if (reason == DLL_PROCESS_ATTACH) {
 #ifdef RAVEN_TLS_DYNAMIC
 		if (reserved || tls_state != 12)
-#else
+#elif defined(_WIN64)
 		if (!reserved || tls_state != 12)
+#else
+		if (tls_state != 12)
 #endif
 			return FALSE;
 		tls_state = 123;
@@ -98,16 +116,35 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved)
 }
 #else
 __declspec(dllimport) DWORD QueryTLS(void);
+__declspec(dllimport) DWORD ReadTLSValue(void);
 __declspec(dllexport) volatile DWORD entered;
+
+static DWORD WINAPI worker(void *argument)
+{
+	(void)argument;
+	struct tls_block *block = current_tls();
+	if (_tls_index || block->value != 17 || block->marker != 0x12345678 || block->zero || ReadTLSValue() != 17)
+		return 1;
+	block->value = 37;
+	return ReadTLSValue() != 17;
+}
 
 DWORD raven_entry(void)
 {
 	entered = 1;
+	if (_tls_index)
+		return 12;
 	if (tls_state != 12 || !QueryTLS() || current_tls()->value != 19 || current_tls()->zero != 77)
 		return 10;
 	current_tls()->value = 25;
 	if (!QueryTLS())
 		return 11;
+	HANDLE thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
+	DWORD result = 99;
+	if (!thread || WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0 || !GetExitCodeThread(thread, &result) || result ||
+		current_tls()->value != 25 || !QueryTLS())
+		return 13;
+	CloseHandle(thread);
 	tls_state = 123;
 	return 0;
 }

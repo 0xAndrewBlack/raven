@@ -1596,7 +1596,11 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	environment.prepare_parameters(*launch,standard_handles);
 	ApiRegistry api_registry, desktop_api;
 	NativeLoaderData loader_data(process, environment.peb(), modules, entry);
-	NativeTLS tls(process, environment, order);
+	// Compilers can address executable TLS through slot zero without reading its index.
+	auto tls_order = order;
+	std::erase(tls_order, &entry);
+	tls_order.insert(tls_order.begin(), &entry);
+	NativeTLS tls(process, environment, tls_order);
 	NativeModuleAPI module_api(process, environment, modules, entry);
 	NativeResources resources(process, environment, modules, entry);
 	// What a program may commit: 512 MiB by default, as set by RAVEN_COMMIT_LIMIT_MB (large programs, a browser engine for one, need more).

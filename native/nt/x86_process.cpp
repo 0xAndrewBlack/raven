@@ -1184,8 +1184,10 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	try {
 		wait_suspended_process(launch->suspended_fd, kernel_objects);
 		// Images of the startup graph with thread local storage get their blocks, and their callbacks hear about the process starting.
+		static_tls.add(entry);
 		for (const auto &[name, module] : modules.all())
-			static_tls.add(*module);
+			if (module.get() != &entry)
+				static_tls.add(*module);
 		// Dependencies first, the program last: each image's callbacks, then the entry point of a library that ships with the program.
 		const auto start_image = [&](const PEModule &module) {
 			for (const auto callback : static_tls.callbacks(module)) {

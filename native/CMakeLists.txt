@@ -3071,6 +3071,24 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         add_test(NAME native_collision_cli COMMAND raven --run-process --execution=native
             ${TLS_FIXTURES}/collision/client.exe ${TLS_FIXTURES}/collision/tlsprobe.dll)
         set_tests_properties(native_collision_cli PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        if(RAVEN_MINGW32)
+            set(TLS32_FIXTURES ${TLS_FIXTURES}/x86)
+            add_custom_command(OUTPUT ${TLS32_FIXTURES}/tlsprobe.dll ${TLS32_FIXTURES}/tlsprobe.a
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${TLS32_FIXTURES}
+                COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -shared -fno-stack-protector -DRAVEN_TLS_DLL
+                    -Wl,--entry,_DllMain@12,--image-base,0x19000000 -Wl,--out-implib,${TLS32_FIXTURES}/tlsprobe.a
+                    -o ${TLS32_FIXTURES}/tlsprobe.dll ${LOADER_SOURCES}/tls_client.c -lkernel32
+                DEPENDS ${LOADER_SOURCES}/tls_client.c VERBATIM)
+            add_custom_command(OUTPUT ${TLS32_FIXTURES}/z-client.exe
+                COMMAND ${RAVEN_MINGW32} -O2 -nostdlib -fno-stack-protector
+                    -Wl,--entry,_raven_entry,--image-base,0x19200000
+                    -o ${TLS32_FIXTURES}/z-client.exe ${LOADER_SOURCES}/tls_client.c ${TLS32_FIXTURES}/tlsprobe.a -lkernel32
+                DEPENDS ${LOADER_SOURCES}/tls_client.c ${TLS32_FIXTURES}/tlsprobe.a VERBATIM)
+            add_custom_target(tls32_pe_fixtures ALL DEPENDS ${TLS32_FIXTURES}/z-client.exe ${TLS32_FIXTURES}/tlsprobe.dll)
+            add_test(NAME native_static_tls_x32 COMMAND raven --run-process --execution=native
+                ${TLS32_FIXTURES}/z-client.exe ${TLS32_FIXTURES}/tlsprobe.dll)
+            set_tests_properties(native_static_tls_x32 PROPERTIES TIMEOUT 15 PASS_REGULAR_EXPRESSION "Native entry returned 0 ")
+        endif()
         add_custom_command(OUTPUT ${MODULE_FIXTURES}/target.dll
             COMMAND ${CMAKE_COMMAND} -E make_directory ${MODULE_FIXTURES}
             COMMAND ${RAVEN_MINGW64} -O2 -nostdlib -shared -fno-stack-protector
