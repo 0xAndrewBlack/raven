@@ -18,6 +18,8 @@
 
 namespace raven {
 
+class AccessToken;
+
 // A Windows thread: guest registers and stack, plus the host coroutine that runs its API handlers.
 struct GuestThread {
 	enum class State { ready, running, waiting, done };
@@ -45,6 +47,7 @@ struct GuestThread {
 	};
 	std::deque<Apc> apcs;
 	int priority = 0;
+	std::shared_ptr<AccessToken> impersonation;
 	// Pipes to the processes that hold a handle to this thread: each gets the exit code when the thread ends.
 	std::vector<int> exit_reports;
 };
@@ -52,6 +55,7 @@ struct GuestThread {
 class ThreadObject : public KernelObject {
 public:
 	std::u16string_view type_name() const override { return u"Thread"; }
+	uint32_t default_access() const override { return 0x1fffff; }
 	explicit ThreadObject(std::shared_ptr<GuestThread> thread) : thread(std::move(thread)) {}
 	int signaled(uint32_t) const override { return thread->state == GuestThread::State::done; }
 	// A handle that goes to another process carries a pipe the thread's end is reported on.
@@ -128,9 +132,11 @@ public:
 	// Ends every thread but the running one where it stands, as ExitProcess does before the libraries are told the process detaches.
 	void terminate_others(uint32_t code);
 	void resume(GuestThread &thread);
+	uint32_t suspend(GuestThread &thread);
 	// Lets every thread that is still blocked or not yet started leave through its host frames; called when the process ends.
 	void unwind_all();
 	size_t live() const;
+	std::vector<uint32_t> thread_ids() const;
 	// Thread blocks of every thread that has not finished.
 	std::vector<uint64_t> thread_blocks() const;
 

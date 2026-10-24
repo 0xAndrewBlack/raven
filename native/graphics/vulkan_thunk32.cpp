@@ -190,6 +190,18 @@ void VulkanThunk32::convert_elements(const StructInfo &structure, const uint8_t 
 		case Field::raw_union:
 			std::memcpy(to, from, std::min<size_t>(field.size32, field.size64));
 			break;
+		case Field::descriptor_data: {
+			const auto type = static_cast<VkDescriptorType>(evaluate(field.len, context));
+			if (type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR || type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_NV) {
+				put_little(to, 8, little(from, 8));
+				break;
+			}
+			const auto pointer = little(from, 4);
+			const bool address = type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER ||
+				type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			put_little(to, 8, pointer && address ? convert(field.target, pointer, 1, false) : pointer);
+			break;
+		}
 		case Field::dhandle:
 			put_little(to, 8, token_of(uint32_t(little(from, 4))));
 			break;

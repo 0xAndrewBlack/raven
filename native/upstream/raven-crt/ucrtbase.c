@@ -622,7 +622,31 @@ CRT void _exit(int status) { ExitProcess((UINT)status); }
 CRT void exit(int status) { _cexit(); ExitProcess((UINT)status); }
 CRT void abort(void) { ExitProcess(3); }
 CRT void __cdecl _assert(const char *expression, const char *file, unsigned line) { ExitProcess(3); }
-CRT int *_errno(void) { static int value; return &value; }
+typedef struct {
+	int error;
+	unsigned long dos_error;
+} ErrorState;
+
+DWORD _tls_index;
+static ErrorState error_template;
+const IMAGE_TLS_DIRECTORY _tls_used __attribute__((section(".rdata$T"))) = {
+	(ULONG_PTR)&error_template, (ULONG_PTR)&error_template + sizeof(error_template),
+	(ULONG_PTR)&_tls_index, 0, 0, IMAGE_SCN_ALIGN_4BYTES
+};
+
+static ErrorState *thread_errors(void)
+{
+	ErrorState **slots;
+#ifdef __x86_64__
+	__asm__("movq %%gs:0x58,%0" : "=r"(slots));
+#else
+	__asm__("movl %%fs:0x2c,%0" : "=r"(slots));
+#endif
+	return slots[_tls_index];
+}
+
+CRT int *_errno(void) { return &thread_errors()->error; }
+CRT unsigned long *__doserrno(void) { return &thread_errors()->dos_error; }
 CRT void _invalid_parameter_noinfo(void) {}
 CRT void _invalid_parameter_noinfo_noreturn(void) { ExitProcess(3); }
 

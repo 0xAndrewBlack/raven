@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <vector>
 
 namespace raven {
 
@@ -10,6 +11,7 @@ namespace {
 
 #include "system_exports.inc"
 #include "system_arguments.inc"
+#include "system_ordinals.inc"
 
 constexpr std::array<std::pair<std::string_view, uint16_t>, 6> comctl32_ordinals{{
 	{"DefSubclassProc", 413}, {"GetWindowSubclass", 411}, {"InitCommonControls", 17}, {"LoadIconWithScaleDown", 381},
@@ -56,24 +58,41 @@ std::span<const std::string_view> system_export_names(std::string_view dll)
 	return {};
 }
 
+// The Windows numbers of a library's exports, as its specification records them, with the pins above added for names it lacks.
+template <const auto &spec, const auto &pinned>
+std::span<const std::pair<std::string_view, uint16_t>> merged_ordinals()
+{
+	static const auto merged = [] {
+		std::vector<std::pair<std::string_view, uint16_t>> list(std::begin(spec), std::end(spec));
+		for (const auto &entry : pinned)
+			if (std::none_of(list.begin(), list.end(), [&](const auto &item) { return item.first == entry.first || item.second == entry.second; }))
+				list.push_back(entry);
+		std::sort(list.begin(), list.end());
+		return list;
+	}();
+	return merged;
+}
+
 std::span<const std::pair<std::string_view, uint16_t>> system_export_ordinals(std::string_view dll)
 {
 	if (dll == "comctl32.dll")
-		return comctl32_ordinals;
+		return merged_ordinals<comctl32_spec_ordinals, comctl32_ordinals>();
 	if (dll == "shell32.dll")
-		return shell32_ordinals;
+		return merged_ordinals<shell32_spec_ordinals, shell32_ordinals>();
 	if (dll == "oleaut32.dll")
-		return oleaut32_ordinals;
+		return merged_ordinals<oleaut32_spec_ordinals, oleaut32_ordinals>();
 	if (dll == "shlwapi.dll")
-		return shlwapi_ordinals;
+		return merged_ordinals<shlwapi_spec_ordinals, shlwapi_ordinals>();
 	if (dll == "ws2_32.dll")
-		return ws2_32_ordinals;
+		return merged_ordinals<ws2_32_spec_ordinals, ws2_32_ordinals>();
 	if (dll == "wsock32.dll")
-		return wsock32_ordinals;
+		return merged_ordinals<wsock32_spec_ordinals, wsock32_ordinals>();
 	if (dll == "dsound.dll")
 		return dsound_ordinals;
 	if (dll == "sfc.dll")
 		return sfc_ordinals;
+	if (dll == "wldap32.dll")
+		return wldap32_spec_ordinals;
 	return {};
 }
 

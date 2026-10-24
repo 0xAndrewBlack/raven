@@ -102,7 +102,6 @@ void alias_api_sets(ModuleSet &modules)
 
 void register_image(NativeMemory &memory, const PEModule &module)
 {
-	if (module.runtime_api) return;
 	std::vector<std::pair<std::pair<uint64_t,uint64_t>,uint32_t>> sections;
 	sections.push_back({{0,module.image.headers_size},2});
 	for (const auto &section:module.image.sections) {

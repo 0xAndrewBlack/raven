@@ -21,7 +21,7 @@ public:
 		std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call);
 	// The base of the loaded library, or zero with the last error set. A library only mapped, as DONT_RESOLVE_DLL_REFERENCES asks, has
 	// its imports left alone and is never started or told it is detached.
-	uint64_t load(std::string name, bool only_map = false);
+	uint64_t load(std::string name, bool only_map = false, uint32_t search_flags = 0);
 	// The base of a library already loaded from this path, zero when there is none; it takes no reference.
 	uint64_t find(const std::string &name) const;
 	// Gives one reference back; at the last one the library is told its process is done with it and a later load starts it afresh.
@@ -46,6 +46,7 @@ private:
 	std::map<const PEModule *, uint64_t> entry_contexts;
 	uint64_t importer_context = 0;
 	bool mapping_only = false;
+	uint32_t library_flags = 0;
 	struct Held {
 		PEModule *module;
 		size_t references;

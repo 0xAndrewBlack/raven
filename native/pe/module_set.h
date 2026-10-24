@@ -3,6 +3,7 @@
 #include "loaded_image.h"
 
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -50,12 +51,13 @@ struct PEModule {
 class ModuleSet {
 public:
 	// Keep a free preferred base; relocate colliding images into graph-owned space.
-	PEModule &add(std::string name, ModuleBytes bytes);
+	// A process loader also excludes its allocations through available.
+	PEModule &add(std::string name, ModuleBytes bytes, std::function<bool(uint64_t, uint64_t)> available = {});
 	PEModule &add(std::string name, ModuleBytes bytes, uint64_t base);
 	// The process loader must release guest mappings and references before erasing an image.
 	void remove(const PEModule &module);
 	// An image mapped only to be read, as a data file or for its resources: it may have the other width, and nothing resolves through it.
-	PEModule &add_data(std::string name, ModuleBytes bytes);
+	PEModule &add_data(std::string name, ModuleBytes bytes, std::function<bool(uint64_t, uint64_t)> available = {});
 	const std::map<std::string, std::unique_ptr<PEModule>> &all() const;
 	uint64_t resolve(const PEImport &symbol) const;
 	std::vector<const PEModule *> resolution_path(const PEImport &symbol) const;

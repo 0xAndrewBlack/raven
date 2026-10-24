@@ -42,7 +42,7 @@ __declspec(dllexport) uint32_t textured[256];
 
 unsigned int raven_entry(void)
 {
-	if (vkEnumerateInstanceVersion(&loader_version) != VK_SUCCESS || loader_version < VK_API_VERSION_1_0)
+	if (vkEnumerateInstanceVersion(&loader_version) != VK_SUCCESS || loader_version < VK_API_VERSION_1_1)
 		return 1;
 	if (vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumeratePhysicalDevices") ||
 		vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkNotImplemented"))
@@ -50,8 +50,9 @@ unsigned int raven_entry(void)
 	PFN_vkCreateInstance create = (PFN_vkCreateInstance)vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance");
 	if (!create)
 		return 3;
-	VkApplicationInfo application = {VK_STRUCTURE_TYPE_APPLICATION_INFO, 0, "Raven ABI fixture", 1, "Raven", 1, VK_API_VERSION_1_0};
-	VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &application, 0, 0, 0, 0};
+	VkApplicationInfo application = {VK_STRUCTURE_TYPE_APPLICATION_INFO, 0, "Raven ABI fixture", 1, "Raven", 1, VK_API_VERSION_1_1};
+	const char *instance_extensions[] = {"VK_KHR_get_physical_device_properties2"};
+	VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &application, 0, 0, 1, instance_extensions};
 	VkInstance instance = VK_NULL_HANDLE;
 	if (create(&info, 0, &instance) != VK_SUCCESS || !instance)
 		return 4;
@@ -107,6 +108,9 @@ unsigned int raven_entry(void)
 		if (vkCreateDevice(devices[0], &device_info, 0, &device) != VK_SUCCESS || !device)
 			return 16;
 		if (!get_device_proc(device, "vkGetDeviceQueue") || get_device_proc(device, "vkCreateInstance"))
+			return 17;
+		if (get_device_proc(device, "vkSetDebugUtilsObjectNameEXT") || get_device_proc(device, "vkCreateSwapchainKHR") ||
+			vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"))
 			return 17;
 		vkGetDeviceQueue(device, 0, 0, &first);
 		vkGetDeviceQueue(device, 0, 0, &second);
@@ -813,6 +817,13 @@ unsigned int raven_entry(void)
 		VkPhysicalDeviceMemoryProperties2 memory2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, 0};
 		VkFormatProperties2 format2 = {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, 0};
 		VkQueueFamilyProperties2 family2 = {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2, 0};
+		PFN_vkGetPhysicalDeviceFeatures2KHR get_features = (PFN_vkGetPhysicalDeviceFeatures2KHR)vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures2KHR");
+		PFN_vkGetPhysicalDeviceProperties2KHR get_properties = (PFN_vkGetPhysicalDeviceProperties2KHR)vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2KHR");
+		PFN_vkGetPhysicalDeviceMemoryProperties2KHR get_memory = (PFN_vkGetPhysicalDeviceMemoryProperties2KHR)vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceMemoryProperties2KHR");
+		PFN_vkGetPhysicalDeviceFormatProperties2KHR get_format = (PFN_vkGetPhysicalDeviceFormatProperties2KHR)vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFormatProperties2KHR");
+		PFN_vkGetPhysicalDeviceQueueFamilyProperties2KHR get_families = (PFN_vkGetPhysicalDeviceQueueFamilyProperties2KHR)vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceQueueFamilyProperties2KHR");
+		if (!get_features || !get_properties || !get_memory || !get_format || !get_families)
+			return 138;
 		const char *wanted[2] = {"VK_KHR_surface", "VK_KHR_win32_surface"};
 		VkInstanceCreateInfo with_extensions = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &application, 0, 0, 0, 0};
 		VkInstance second = VK_NULL_HANDLE;
@@ -856,22 +867,37 @@ unsigned int raven_entry(void)
 				if (device_extensions[index].extensionName[3] == 'K' && device_extensions[index].extensionName[7] == 's' && device_extensions[index].extensionName[8] == 'w')
 					swapchain_offered = 1;
 		}
-		vkGetPhysicalDeviceFeatures2(devices[0], &features2);
-		vkGetPhysicalDeviceProperties2(devices[0], &properties2);
+		get_features(devices[0], &features2);
+		get_properties(devices[0], &properties2);
 		properties_two = properties2.properties;
-		vkGetPhysicalDeviceMemoryProperties2(devices[0], &memory2);
+		if (properties_two.vendorID != observed.vendorID || properties_two.deviceID != observed.deviceID ||
+			properties_two.limits.maxImageDimension2D != observed.limits.maxImageDimension2D)
+			return 139;
+		get_memory(devices[0], &memory2);
 		memory_two = memory2.memoryProperties;
+		if (memory_two.memoryTypeCount != memory_properties.memoryTypeCount || memory_two.memoryHeapCount != memory_properties.memoryHeapCount)
+			return 140;
+		for (index = 0; index < memory_two.memoryTypeCount; ++index)
+			if (memory_two.memoryTypes[index].propertyFlags != memory_properties.memoryTypes[index].propertyFlags ||
+				memory_two.memoryTypes[index].heapIndex != memory_properties.memoryTypes[index].heapIndex)
+				return 141;
+		for (index = 0; index < memory_two.memoryHeapCount; ++index)
+			if (memory_two.memoryHeaps[index].size != memory_properties.memoryHeaps[index].size ||
+				memory_two.memoryHeaps[index].flags != memory_properties.memoryHeaps[index].flags)
+				return 142;
 		vkGetPhysicalDeviceFormatProperties(devices[0], VK_FORMAT_R8G8B8A8_UNORM, &format_one);
-		vkGetPhysicalDeviceFormatProperties2(devices[0], VK_FORMAT_R8G8B8A8_UNORM, &format2);
+		get_format(devices[0], VK_FORMAT_R8G8B8A8_UNORM, &format2);
 		format_two = format2.formatProperties;
 		if (vkGetPhysicalDeviceImageFormatProperties(devices[0], VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
 				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &image_format) != VK_SUCCESS)
 			return 136;
 		family_two_count = 1;
-		vkGetPhysicalDeviceQueueFamilyProperties2(devices[0], &family_two_count, &family2);
+		get_families(devices[0], &family_two_count, &family2);
 		family_two = family2.queueFamilyProperties;
 		if (family_two_count != 1 || !family_two.queueCount || !properties_two.apiVersion)
 			return 137;
+		if (family_two.queueFlags != families[0].queueFlags || family_two.queueCount != families[0].queueCount)
+			return 143;
 		extension_workflow = 1;
 	}
 	vkDestroyInstance(instance, 0);

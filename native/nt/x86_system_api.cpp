@@ -306,7 +306,11 @@ bool NativeX86System::dispatch(std::string_view name)
 		if (!thread) {
 			fail(6, UINT32_MAX);
 		} else {
-			process.return_api(uint32_t(thread->thread->suspend_count++));
+			const auto previous = threads.suspend(*thread->thread);
+			if (previous == UINT32_MAX)
+				fail(5, UINT32_MAX);
+			else
+				process.return_api(previous);
 		}
 	} else if (name == "GetThreadContext" || name == "SetThreadContext") {
 		fail(50);
@@ -329,14 +333,14 @@ bool NativeX86System::dispatch(std::string_view name)
 		process.write_memory(args[0], info);
 		process.return_api(0);
 	} else if (name == "VirtualQuery" || name == "VirtualQueryEx") {
-		// VirtualQueryEx answers for the program itself; another process's memory is not reachable from here.
+		// The shared process API queries other processes through their owner's channel.
 		const bool other = name == "VirtualQueryEx" && args[0] != 0xffffffffULL;
+		if (other)
+			return false;
 		const auto address = name == "VirtualQuery" ? args[0] : args[1], buffer = name == "VirtualQuery" ? args[1] : args[2];
 		const auto length = name == "VirtualQuery" ? args[2] : args[3];
-		const auto region = other ? std::nullopt : memory.query(address);
-		if (other) {
-			fail(5);
-		} else if (!region || length < 28) {
+		const auto region = memory.query(address);
+		if (!region || length < 28) {
 			fail(87);
 		} else {
 			const auto &raw = *region;

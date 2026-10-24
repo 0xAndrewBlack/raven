@@ -1,4 +1,6 @@
 #include "child_process.h"
+#include "event.h"
+#include "mutex.h"
 #include "threads.h"
 #include "handle_channel.h"
 #include "pipe.h"
@@ -432,6 +434,98 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("NtWriteFile", 9, [native_transfer](ApiCall &call) { native_transfer(call, false); });
 	registry.add("NtReadFile", 9, [native_transfer](ApiCall &call) { native_transfer(call, true); });
+	const auto query_directory = [&objects, file_of](ApiCall &call) {
+		try {
+			if (!call[4]) { call.ret(0xc000000dU); return; }
+			const auto finish = [&](uint32_t status, size_t count = 0) {
+				call.store_pointer(call[4], status);
+				call.store_pointer(call[4] + call.pointer_width(), count);
+				call.ret(status);
+			};
+			finish(0);
+			const auto file = file_of(call[0]);
+			if (!file) { finish(0xc0000008U); return; }
+			if (!file->directory) { finish(0xc0000103U); return; }
+			if (!(objects.access_of(call[0]) & (0x80000000U | 0x10000000U | 1U))) { finish(0xc0000022U); return; }
+			if (call[1] || call[2] || call[3] || file->port) { finish(0xc00000bbU); return; }
+			const auto information = call.u32(7), capacity = call.u32(6);
+			const size_t header = information == 1 ? 64 : information == 2 ? 68 : information == 3 ? 94 : information == 12 ? 12 : 0;
+			if (!header) { finish(0xc0000003U); return; }
+			if (capacity < header) { finish(0xc0000023U); return; }
+			if (!call[5]) { finish(0xc0000005U); return; }
+			std::lock_guard lock(file->directory_mutex);
+			const bool first = !file->directory_scan;
+			if (first) {
+				std::u16string pattern = u"*";
+				if (call[9]) {
+					const auto length = call.load<uint16_t>(call[9]);
+					if ((length & 1) || length > call.load<uint16_t>(call[9] + 2)) { finish(0xc000000dU); return; }
+					const auto bytes = call.read(call.load_pointer(call[9] + call.pointer_width()), length);
+					pattern.resize(length / 2);
+					if (length) std::memcpy(pattern.data(), bytes.data(), length);
+					if (pattern.find_first_of(u"\\/:") != pattern.npos) { finish(0xc000000dU); return; }
+				}
+				const int descriptor = ::openat(file->descriptor, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+				if (descriptor < 0) { finish(errno == EACCES ? 0xc0000022U : 0xc0000001U); return; }
+				DIR *stream = ::fdopendir(descriptor);
+				if (!stream) { ::close(descriptor); finish(0xc000009aU); return; }
+				struct CloseDirectory { DIR *stream; ~CloseDirectory() { ::closedir(stream); } } close{stream};
+				auto scan = std::make_shared<FindObject>();
+				for (;;) {
+					errno = 0;
+					const auto *item = ::readdir(stream);
+					if (!item) {
+						if (errno) { finish(0xc0000001U); return; }
+						break;
+					}
+					const auto name = from_utf8(item->d_name);
+					if (!wildcard(pattern, name)) continue;
+					struct stat metadata{};
+					if (::fstatat(file->descriptor, item->d_name, &metadata, 0)) continue;
+					scan->entries.push_back({name, attributes_of(metadata, item->d_name), filetime(metadata.st_ctim),
+						filetime(metadata.st_atim), filetime(metadata.st_mtim), S_ISDIR(metadata.st_mode) ? 0 : uint64_t(metadata.st_size),
+						uint64_t(metadata.st_blocks) * 512});
+				}
+				file->directory_pattern = std::move(pattern);
+				file->directory_scan = std::move(scan);
+			}
+			const auto &scan = file->directory_scan;
+			size_t next = call.u32(10) ? 0 : scan->next;
+			if (next == scan->entries.size()) { finish(first ? 0xc000000fU : 0x80000006U); return; }
+			std::vector<uint8_t> bytes;
+			size_t previous = 0;
+			uint32_t status = 0;
+			while (next < scan->entries.size()) {
+				const auto &entry = scan->entries[next];
+				const size_t start = bytes.empty() ? 0 : (bytes.size() + 7) & ~size_t(7);
+				const size_t size = header + entry.name.size() * 2;
+				if (start + size > capacity && (!bytes.empty() || !first)) break;
+				const size_t copied = std::min(size, capacity - start);
+				bytes.resize(start + copied);
+				if (start) put32(bytes, previous, uint32_t(start - previous));
+				put32(bytes, start + (information == 12 ? 8 : 60), uint32_t(entry.name.size() * 2));
+				if (information != 12) {
+					put64(bytes, start + 8, entry.creation);
+					put64(bytes, start + 16, entry.access);
+					put64(bytes, start + 24, entry.write);
+					put64(bytes, start + 32, entry.creation);
+					put64(bytes, start + 40, entry.size);
+					put64(bytes, start + 48, entry.allocation);
+					put32(bytes, start + 56, entry.attributes);
+				}
+				std::memcpy(bytes.data() + start + header, entry.name.data(), copied - header);
+				if (copied < size) { status = 0x80000005U; break; }
+				++next;
+				previous = start;
+				if (call.u32(8)) break;
+			}
+			call.write(call[5], bytes);
+			finish(status, bytes.size());
+			scan->next = next;
+		} catch (const ApiFault &) { call.ret(0xc0000005U); }
+	};
+	registry.add("NtQueryDirectoryFile", 11, query_directory);
+	registry.add("ZwQueryDirectoryFile", 11, query_directory);
 	// No file is encrypted: decrypting one that exists has nothing to do, and encryption is not offered.
 	const auto decrypt = [&, resolve](ApiCall &call, bool wide) {
 		const auto name = wide ? call.wide(call[0]) : from_utf8(call.narrow(call[0]));
@@ -964,6 +1058,10 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 				break;
 			}
 		}
+		if (good) {
+			const timespec times[]{metadata.st_atim, metadata.st_mtim};
+			good = ::futimens(target, times) == 0;
+		}
 		const int error = errno;
 		::close(source);
 		::close(target);
@@ -1391,8 +1489,34 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("DuplicateHandle", 7, [&, resolve, missing, file_of, find_first, copy_file](ApiCall &call) {
 		constexpr uint64_t current = UINT64_MAX;
 		constexpr uint32_t same_access = 0x2, close_source = 0x1;
+		const auto source_process = call[0] == current ? nullptr : objects.object(call[0]);
+		const auto target_process = call[2] == current ? nullptr : objects.object(call[2]);
+		for (const auto handle : {call[0], call[2]}) {
+			if (handle == current) continue;
+			const auto &object = handle == call[0] ? source_process : target_process;
+			if (!object || object->type_name() != u"Process") { call.fail(6); return; }
+			if (!(objects.access_of(handle) & 0x40)) { call.fail(5); return; }
+		}
+		if (call[3]) {
+			const auto previous = call.read(call[3], call.pointer_width());
+			call.write(call[3], previous);
+		}
 		const bool from_self = call[0] == current || objects.object_as<SelfProcessObject>(call[0]);
 		const bool to_self = call[2] == current || objects.object_as<SelfProcessObject>(call[2]);
+		std::optional<uint32_t> typed_rights;
+		const auto source = from_self ? objects.object(call[1]) : nullptr;
+		const bool token = std::dynamic_pointer_cast<AccessToken>(source) != nullptr;
+		const bool event = source && source->type_name() == u"Event";
+		const bool mutant = source && source->type_name() == u"Mutant";
+		if ((token || event || mutant) && !(call.u32(6) & same_access)) {
+			const auto requested = token ? token_access(call.u32(4)) : event ? event_access(call.u32(4)) : mutex_access(call.u32(4));
+			const uint32_t held = objects.access_of(call[1]);
+			if (!requested) {
+				call.fail(87);
+				return;
+			}
+			typed_rights = call.u32(4) & 0x02000000U ? held : *requested;
+		}
 		// The channel to the process a handle names: a child of this one, or the parent that started it.
 		const auto channel_of = [&](uint64_t handle) -> HandleChannel * {
 			const auto process = objects.object_as<ProcessObject>(handle);
@@ -1411,14 +1535,14 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 				call.fail(50);
 				return;
 			}
-			record.handle_access = objects.access_of(call[1]);
-			const uint64_t value = channel->send(std::move(record), call.u32(5));
-			if (!value) {
-				call.fail(50);
+			record.handle_access = typed_rights.value_or(objects.access_of(call[1]));
+			const auto made = channel->send(objects, context.threads, std::move(record), call.u32(5));
+			if (made.status || !made.value) {
+				call.fail(made.status == 0xc000009aU ? 8 : made.status == 0xc0000008U ? 6 : 50);
 				return;
 			}
 			if (call[3])
-				call.store_pointer(call[3], value);
+				call.store_pointer(call[3], made.value);
 			if ((call.u32(6) & close_source) && call[1] != UINT64_MAX && call[1] != UINT64_MAX - 1)
 				objects.close(call[1]);
 			call.ret(1);
@@ -1437,12 +1561,22 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 				call.fail(6);
 				return;
 			}
+			uint32_t granted = (call.u32(6) & same_access) || !call.u32(4) ? access : call.u32(4);
+			if ((std::dynamic_pointer_cast<AccessToken>(object) || object->type_name() == u"Event" || object->type_name() == u"Mutant") && !(call.u32(6) & same_access)) {
+				const auto requested = object->type_name() == u"Event" ? event_access(call.u32(4)) :
+					object->type_name() == u"Mutant" ? mutex_access(call.u32(4)) : token_access(call.u32(4));
+				if (!requested) {
+					call.fail(87);
+					return;
+				}
+				granted = call.u32(4) & 0x02000000U ? access : *requested;
+			}
 			const auto made = objects.add_object(object);
 			if (made.status) {
 				call.fail(4);
 				return;
 			}
-			objects.set_access(made.value, (call.u32(6) & same_access) || !call.u32(4) ? (access ? access : 0x1f0003) : call.u32(4));
+			objects.set_access(made.value, granted);
 			if (call.u32(5))
 				objects.set_inherit(made.value, true);
 			if (call[3])
@@ -1455,7 +1589,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		// The current-thread pseudo handle duplicates into a real handle to the calling thread; the current-process one into the process itself.
-		std::optional<uint32_t> narrowed;
+		std::optional<uint32_t> narrowed = typed_rights;
 		const bool section = objects.object_as<SectionObject>(call[1]) != nullptr;
 		if (section && !(call.u32(6) & same_access)) {
 			// A copy cannot carry rights the original lacks; asking for them is refused.
@@ -1470,7 +1604,7 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 				return;
 			}
 			narrowed = wanted;
-		} else if (!(call.u32(6) & same_access) && call[1] < UINT64_MAX - 1) {
+		} else if (!typed_rights && !(call.u32(6) & same_access) && call[1] < UINT64_MAX - 1) {
 			// Any other copy holds the rights it asks for; asking for everything gives what the original holds.
 			const uint32_t wanted = call.u32(4);
 			narrowed = wanted & (0x10000000U | 0x02000000U) ? objects.access_of(call[1]) : wanted;
@@ -1491,6 +1625,59 @@ void register_file_api(ApiRegistry &registry, KernelContext &context)
 			objects.close(call[1]);
 		call.ret(1);
 	});
+	// Power requests keep the machine awake while a program works, as during a download; the host's own power management decides here, so a
+	// request is a handle that setting and clearing accept.
+	registry.add("PowerCreateRequest", 1, [&objects](ApiCall &call) {
+		const auto made = objects.create_event(0x1f0003, 0, false);
+		if (made.status) {
+			call.fail(8, UINT64_MAX);
+			return;
+		}
+		call.ret(made.value);
+	});
+	for (const char *name : {"PowerSetRequest", "PowerClearRequest"})
+		registry.add(name, 2, [](ApiCall &call) { call.ret(1); });
+	// Kernel transactions: a transaction is a handle the transacted file calls name, committed or rolled back at the end. The calls here
+	// take effect at once, as they do when no transaction is given, so committing succeeds and rolling back leaves what was done.
+	registry.add("CreateTransaction", 7, [&objects](ApiCall &call) {
+		const auto made = objects.create_event(0x1f0003, 0, false);
+		if (made.status) {
+			call.fail(8, UINT64_MAX);
+			return;
+		}
+		call.ret(made.value);
+	});
+	for (const char *name : {"CommitTransaction", "CommitTransactionAsync", "RollbackTransaction", "RollbackTransactionAsync"})
+		registry.add(name, 1, [](ApiCall &call) { call.ret(1); });
+	// Each transacted file call is its plain form without the transaction: (name, plain form, its arguments taken from the first ones).
+	struct Transacted {
+		const char *name, *plain;
+		size_t arguments;
+		std::vector<size_t> from;
+	};
+	const Transacted transacted[] = {
+		{"CreateFileTransactedW", "CreateFileW", 10, {0, 1, 2, 3, 4, 5, 6}},
+		{"DeleteFileTransactedW", "DeleteFileW", 2, {0}},
+		{"MoveFileTransactedW", "MoveFileExW", 6, {0, 1, 4}},
+		{"CopyFileTransactedW", "CopyFileExW", 7, {0, 1, 2, 3, 4, 5}},
+		{"CreateDirectoryTransactedW", "CreateDirectoryW", 4, {1, 2}},
+		{"RemoveDirectoryTransactedW", "RemoveDirectoryW", 2, {0}},
+		{"GetFileAttributesTransactedW", "GetFileAttributesExW", 4, {0, 1, 2}},
+		{"SetFileAttributesTransactedW", "SetFileAttributesW", 3, {0, 1}},
+	};
+	for (const auto &entry : transacted) {
+		const auto plain = registry.find(entry.plain);
+		if (!plain)
+			continue;
+		registry.add(entry.name, entry.arguments, [handler = plain->second, from = entry.from](ApiCall &call) {
+			std::vector<uint64_t> words;
+			for (const auto index : from)
+				words.push_back(call[index]);
+			ApiCall inner(call.process, call.environment, words);
+			handler(inner);
+			call.ret(inner.result);
+		});
+	}
 }
 
 }

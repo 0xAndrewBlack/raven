@@ -217,7 +217,7 @@ void NativeWindows::post_due_timers()
 			return message.message == kind && message.window == timer.window && message.wparam == timer.id;
 		});
 		if (!pending && messages.size() < 10000)
-			queue({timer.window, timer.id, timer.procedure, kind, uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()), cursor_x, cursor_y, 0, timer.window ? 0 : timer.thread});
+			queue({timer.window, timer.id, timer.procedure, kind, uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()), cursor_x, cursor_y, 0, timer.window ? 0 : timer.thread},0x10);
 		timer.due = now + std::chrono::milliseconds(timer.interval);
 	}
 }

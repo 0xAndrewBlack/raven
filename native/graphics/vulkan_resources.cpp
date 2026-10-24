@@ -1,4 +1,5 @@
 #include "vulkan_bridge.h"
+#include "shared_gpu_memory.h"
 #include "nt/runtime_profile.h"
 #include <chrono>
 
@@ -55,31 +56,22 @@ uint64_t VulkanBridge::make_shadow(Memory &memory, size_t size)
 		throw;
 	}
 	memory.shadow_file = file;
+	memory.mapping_base = guest;
 	memory.view = static_cast<uint8_t *>(view);
 	memory.view_size = rounded;
 	return guest;
 }
 
-void VulkanBridge::release_import(Memory &memory)
-{
-	if (memory.import_host)
-		munmap(memory.import_host, memory.import_size);
-	if (memory.import_file >= 0)
-		close(memory.import_file);
-	memory.import_host = nullptr;
-	memory.import_file = -1;
-	memory.import_size = 0;
-}
-
 void VulkanBridge::drop_shadow(Memory &memory)
 {
-	if (memory.shadow)
-		process.unmap_memory(memory.shadow);
+	if (memory.mapping_base)
+		process.unmap_memory(memory.mapping_base);
 	if (memory.view)
 		munmap(memory.view, memory.view_size);
 	if (memory.shadow_file >= 0)
 		close(memory.shadow_file);
 	memory.shadow = 0;
+	memory.mapping_base = 0;
 	memory.view = nullptr;
 	memory.view_size = 0;
 	memory.shadow_file = -1;
@@ -212,14 +204,11 @@ if (name == "vkFreeMemory") {
 		no_allocator(a[2]);
 		if (a[1]) {
 			auto &memory = memory_of(a[1], a[0]);
-			if (memory.host && memory.import_file >= 0) {
-				process.unmap_memory(memory.shadow);
-			} else if (memory.host) {
+			if (memory.host) {
 				vkUnmapMemory(device.handle, memory.handle);
 				drop_shadow(memory);
 			}
 			vkFreeMemory(device.handle, memory.handle, nullptr);
-			release_import(memory);
 			memories.erase(a[1]);
 		}
 	} else if (name == "vkMapMemory") {
@@ -230,24 +219,27 @@ if (name == "vkFreeMemory") {
 			throw std::runtime_error("unsupported Vulkan memory mapping (offset " + std::to_string(offset) + ", size " + std::to_string(size) +
 				", memory " + std::to_string(memory.size) + (memory.host ? ", already mapped" : "") + ", flags " + std::to_string(a[4]) + ")");
 		check_writable(a[5], 8);
-		if (memory.import_file >= 0) {
-			// Imported memory: the guest maps the same file the driver reads, so the mapping is the memory itself.
-			const auto guest = process.map_shared(memory.import_file, memory.import_size);
-			memory.host = memory.import_host + offset;
-			memory.shadow = guest;
-			memory.offset = offset;
-			memory.mapped = size;
-			store(a[5], guest + offset);
-			process.return_api(0);
-			return true;
-		}
 		void *host = nullptr;
 		const auto status = vkMapMemory(device.handle, memory.handle, offset, size, 0, &host);
 		result = static_cast<uint32_t>(status);
 		if (status == VK_SUCCESS) {
-			memory.snapshot.assign(static_cast<const uint8_t *>(host), static_cast<const uint8_t *>(host) + size);
-			const auto shadow = make_shadow(memory, size_t(size));
-			std::memcpy(memory.view, memory.snapshot.data(), memory.snapshot.size());
+			uint64_t shadow = 0;
+			try {
+				if (memory.coherent)
+					if (const auto mapping = map_gpu_memory(process, host, size_t(size))) {
+						shadow = mapping->address;
+						memory.mapping_base = mapping->base;
+					}
+				if (!shadow) {
+					memory.snapshot.assign(static_cast<const uint8_t *>(host), static_cast<const uint8_t *>(host) + size);
+					shadow = make_shadow(memory, size_t(size));
+					std::memcpy(memory.view, memory.snapshot.data(), memory.snapshot.size());
+				}
+			} catch (...) {
+				memory.snapshot.clear();
+				vkUnmapMemory(device.handle, memory.handle);
+				throw;
+			}
 			memory.host = host;
 			memory.shadow = shadow;
 			memory.offset = offset;
@@ -259,13 +251,6 @@ if (name == "vkFreeMemory") {
 		auto &memory = memory_of(a[1], a[0]);
 		if (!memory.host)
 			throw std::runtime_error("Vulkan memory is not mapped");
-		if (memory.import_file >= 0) {
-			process.unmap_memory(memory.shadow);
-			memory.shadow = 0;
-			memory.host = nullptr;
-			process.return_api(0);
-			return true;
-		}
 		shadow_to_device(a[0]);
 		vkUnmapMemory(device.handle, memory.handle);
 		drop_shadow(memory);

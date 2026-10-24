@@ -6,38 +6,42 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <sys/types.h>
 
 namespace raven {
 
 class KernelObject;
 class NativeObjects;
 class NativeThreads;
+struct NativeObjectResult;
 
-// The first handle value a process gives to a handle it hands to another one, and the first value it expects from that one. The
-// ranges differ per direction and sit above anything a process numbers for itself.
-constexpr uint64_t handle_range_to_child = 0x40000000, handle_range_to_parent = 0x50000000;
+// A queued transfer from an older sender is outside the local handle range and must be received before lookup.
+constexpr uint64_t handle_range_to_child = 0x40000000;
 
 // A socket between a process and one of its children that carries handles after the child started (DuplicateHandle into or out of
-// the other process). A handle sent over arrives as a descriptor with the record that rebuilds the object, and the receiver takes it
-// in when it first looks the value up. A handle asked for is answered by the other process the next time it schedules its threads.
+// the other process). A transfer carries the descriptor and the record that rebuilds the object. The receiver assigns its value;
+// requests are answered when the other process next schedules its threads.
 class HandleChannel {
 public:
-	HandleChannel(int descriptor, uint64_t first_value) : descriptor(descriptor), next(first_value) {}
+	explicit HandleChannel(int descriptor, bool process_only = false) : descriptor(descriptor), process_only(process_only) {}
 	~HandleChannel();
 	HandleChannel(const HandleChannel &) = delete;
 	HandleChannel &operator=(const HandleChannel &) = delete;
-	// Sends a handle the described object stands behind; the value it will have in the other process, or zero on failure.
-	uint64_t send(InheritedHandle record, uint32_t inherit);
+	// The receiver allocates the handle and acknowledges it before the sender returns its value.
+	NativeObjectResult send(NativeObjects &objects, NativeThreads &threads, InheritedHandle record, uint32_t inherit);
 	// Asks the other process for the object behind one of its handles, closing it there when `close_source` is set; null when the
 	// other process has no such handle or it cannot travel. `access` receives the rights the handle carried.
 	std::shared_ptr<KernelObject> fetch(NativeObjects &objects, NativeThreads &threads, uint64_t value, bool close_source, uint32_t &access);
+	std::optional<InheritedHandle> request_process(NativeObjects &objects, NativeThreads &threads, InheritedHandle request);
 	// Takes in the handles that have arrived, answers the requests and keeps the answers to requests of this side.
 	void receive(NativeObjects &objects);
+	bool connected() const;
 
 private:
 	bool send_frame(const InheritedHandle &record, int shared);
+	std::optional<InheritedHandle> exchange(NativeObjects &objects, NativeThreads &threads, InheritedHandle request, int shared = -1);
 	int descriptor;
-	uint64_t next;
+	bool process_only;
 	uint64_t next_request = 1;
 	std::map<uint64_t, std::optional<InheritedHandle>> answers;
 };
@@ -50,5 +54,8 @@ void add_child_channel(HandleChannel *channel);
 void remove_child_channel(HandleChannel *channel);
 // Takes in whatever the other processes have sent and answers what they asked.
 void receive_handles(NativeObjects &objects);
+// Process queries can reach a runtime of this prefix even when it is neither the caller's parent nor its child.
+void enable_process_requests();
+std::shared_ptr<HandleChannel> process_request_channel(pid_t pid);
 
 }

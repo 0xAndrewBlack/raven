@@ -140,6 +140,73 @@ void put_address(ApiCall &call, uint64_t address, uint64_t length_address, const
 
 constexpr uint32_t sol_socket_windows = 0xffff;
 
+std::vector<uint8_t> message_control(ApiCall &call, int descriptor, uint64_t address, uint32_t length)
+{
+	if (length > 65536) throw wsaenobufs;
+	if (length && !address) throw wsaefault;
+	const auto raw = call.read(address, length);
+	const size_t width = call.pointer_width(), header = width + 8;
+	std::vector<uint8_t> result;
+	for (size_t at = 0; at < raw.size();) {
+		if (raw.size() - at < header) throw wsaeinval;
+		uint64_t size = 0;
+		uint32_t level = 0, type = 0;
+		std::memcpy(&size, raw.data() + at, width);
+		std::memcpy(&level, raw.data() + at + width, 4);
+		std::memcpy(&type, raw.data() + at + width + 4, 4);
+		if (size < header || size > raw.size() - at) throw wsaeinval;
+		const auto *data = raw.data() + at + header;
+		const size_t count = size_t(size) - header;
+		int host_type = 0;
+		std::vector<uint8_t> payload;
+		if (level == IPPROTO_IP && type == 19) {
+			if (count != 8) throw wsaeinval;
+			in_pktinfo info{};
+			std::memcpy(&info.ipi_spec_dst, data, 4);
+			std::memcpy(&info.ipi_ifindex, data + 4, 4);
+			payload.resize(sizeof(info));
+			std::memcpy(payload.data(), &info, sizeof(info));
+			host_type = IP_PKTINFO;
+		} else if (level == IPPROTO_IPV6 && type == 19) {
+			if (count != sizeof(in6_pktinfo)) throw wsaeinval;
+			payload.assign(data, data + count);
+			host_type = IPV6_PKTINFO;
+		} else if ((level == IPPROTO_IP || level == IPPROTO_IPV6) && type == 50) {
+			if (count != 4) throw wsaeinval;
+			uint32_t ecn = 0;
+			std::memcpy(&ecn, data, 4);
+			if (ecn > 3) throw wsaeinval;
+			int setting = 0;
+			socklen_t setting_size = sizeof(setting);
+			host_type = level == IPPROTO_IP ? IP_TOS : IPV6_TCLASS;
+			if (::getsockopt(descriptor, int(level), host_type, &setting, &setting_size)) throw wsa_error(errno);
+			setting = (setting & ~3) | int(ecn);
+			payload.resize(sizeof(setting));
+			std::memcpy(payload.data(), &setting, sizeof(setting));
+		} else if (level == IPPROTO_IPV6 && type == 21) {
+			if (count != 4) throw wsaeinval;
+			payload.assign(data, data + count);
+			host_type = IPV6_HOPLIMIT;
+		} else {
+			throw wsaenoprotoopt;
+		}
+		const size_t offset = result.size();
+		result.resize(offset + CMSG_SPACE(payload.size()), 0);
+		auto *control = reinterpret_cast<cmsghdr *>(result.data() + offset);
+		control->cmsg_level = int(level);
+		control->cmsg_type = host_type;
+		control->cmsg_len = CMSG_LEN(payload.size());
+		std::memcpy(CMSG_DATA(control), payload.data(), payload.size());
+		const size_t next = (at + size_t(size) + width - 1) & ~(width - 1);
+		if (next > raw.size()) {
+			if (at + size == raw.size()) break;
+			throw wsaeinval;
+		}
+		at = next;
+	}
+	return result;
+}
+
 }
 
 // One TCP endpoint as the host lists it, with the process that holds the socket when it is a process of this runtime.
@@ -525,6 +592,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		bool receiving = false;
 		std::vector<Buffer> buffers;
 		std::vector<uint8_t> outgoing;
+		std::vector<uint8_t> control;
 		size_t sent = 0;
 		uint32_t flags = 0;
 		uint64_t from = 0, from_length = 0, flags_out = 0, overlapped = 0;
@@ -583,7 +651,18 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			return 0;
 		}
 		while (transfer.sent < transfer.outgoing.size() || transfer.outgoing.empty()) {
-			const ssize_t count = ::sendto(socket.descriptor, transfer.outgoing.data() + transfer.sent, transfer.outgoing.size() - transfer.sent,
+			ssize_t count;
+			if (!transfer.control.empty()) {
+				iovec data{transfer.outgoing.data(), transfer.outgoing.size()};
+				msghdr message{};
+				message.msg_name = transfer.to.empty() ? nullptr : transfer.to.data();
+				message.msg_namelen = socklen_t(transfer.to.size());
+				message.msg_iov = &data;
+				message.msg_iovlen = 1;
+				message.msg_control = transfer.control.data();
+				message.msg_controllen = transfer.control.size();
+				count = ::sendmsg(socket.descriptor, &message, host_flags(transfer.flags) | MSG_DONTWAIT);
+			} else count = ::sendto(socket.descriptor, transfer.outgoing.empty() ? nullptr : transfer.outgoing.data() + transfer.sent, transfer.outgoing.size() - transfer.sent,
 				host_flags(transfer.flags) | MSG_DONTWAIT, transfer.to.empty() ? nullptr : reinterpret_cast<const sockaddr *>(transfer.to.data()),
 				socklen_t(transfer.to.size()));
 			if (count < 0) {
@@ -838,6 +917,58 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 		if (call[3])
 			call.store<uint32_t>(call[3], uint32_t(count));
 		call.ret(0);
+	});
+
+	registry.add("WSASendMsg", 6, [socket_of, fail, buffers_of, start, attempt, wait_ready](ApiCall &call) {
+		try {
+			const auto socket = socket_of(call[0]);
+			if (!socket) { fail(call, wsaenotsock); return; }
+			if (socket->type != SOCK_DGRAM && socket->type != SOCK_RAW) { fail(call, wsaeopnotsupp); return; }
+			if (call[5] || (call.u32(2) & ~5U)) { fail(call, wsaeopnotsupp); return; }
+			if (!call[1] || (!call[3] && !call[4])) { fail(call, wsaefault); return; }
+			const size_t width = call.pointer_width();
+			call.read(call[1], width == 4 ? 28 : 56);
+			if (call[3]) call.write(call[3], call.read(call[3], 4));
+			if (call[4]) call.write(call[4], call.read(call[4], 3 * width + 8));
+			const uint64_t name = call.load_pointer(call[1]);
+			const int32_t name_size = call.load<int32_t>(call[1] + width);
+			if (name_size < 0 || name_size > int32_t(sizeof(sockaddr_storage)) || (name_size && !name)) throw wsaefault;
+			Transfer transfer;
+			transfer.socket = socket;
+			transfer.flags = call.u32(2);
+			transfer.overlapped = call[4];
+			if (name) {
+				if (name_size < 2) throw wsaefault;
+				transfer.to = host_address(call, name, size_t(name_size));
+			}
+			const size_t buffers_at = width == 4 ? 8 : 16, control_at = width == 4 ? 16 : 32;
+			const uint64_t array = call.load_pointer(call[1] + buffers_at);
+			const uint32_t count = call.load<uint32_t>(call[1] + buffers_at + width);
+			if (!array || !count) throw wsaefault;
+			if (count > 64) throw wsaenobufs;
+			for (const auto &buffer : buffers_of(call, array, count)) {
+				if (buffer.length > (1U << 20) - transfer.outgoing.size()) throw wsaemsgsize;
+				const auto bytes = call.read(buffer.address, buffer.length);
+				transfer.outgoing.insert(transfer.outgoing.end(), bytes.begin(), bytes.end());
+			}
+			transfer.control = message_control(call, socket->descriptor,
+				call.load_pointer(call[1] + control_at + width), call.load<uint32_t>(call[1] + control_at));
+			if (transfer.overlapped) { start(call, std::move(transfer), call[3]); return; }
+			uint32_t status = 0;
+			uint64_t sent = 0;
+			while (attempt(transfer, status, sent)) {
+				socket->select_enabled |= fd_write;
+				if (socket->guest_nonblocking) { fail(call, wsaewouldblock); return; }
+				wait_ready(socket->descriptor, POLLOUT, std::nullopt);
+			}
+			if (status) { fail(call, status); return; }
+			call.store<uint32_t>(call[3], uint32_t(sent));
+			call.ret(0);
+		} catch (const ApiFault &) {
+			fail(call, wsaefault);
+		} catch (const uint32_t &error) {
+			fail(call, error);
+		}
 	});
 
 	// The extension functions of Winsock are found through WSAIoctl by GUID; each is an export the runtime answers like any other.
@@ -1227,11 +1358,16 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 	// once until the call that consumes it enables it again, and recording one sets the program's event.
 	auto selected = std::make_shared<std::vector<std::weak_ptr<SocketObject>>>();
 	const auto check_select = [&objects](SocketObject &socket) {
-		if (!socket.select_mask || socket.closed)
+		const auto enabled = socket.select_mask & socket.select_enabled;
+		if (!socket.select_mask || socket.closed || (!enabled && !socket.connecting))
 			return;
 		uint32_t found = 0;
-		pollfd entry{socket.descriptor, POLLIN | POLLOUT | POLLPRI, 0};
-		if (::poll(&entry, 1, 0) < 0)
+		short events = 0;
+		if (enabled & (fd_read | fd_accept | fd_close)) events |= POLLIN;
+		if ((enabled & fd_write) || socket.connecting) events |= POLLOUT;
+		if (enabled & fd_oob) events |= POLLPRI;
+		pollfd entry{socket.descriptor, events, 0};
+		if (::poll(&entry, 1, 0) <= 0)
 			return;
 		const auto record = [&](uint32_t event, size_t bit, int32_t error) {
 			if (!(socket.select_mask & event) || !(socket.select_enabled & event))
@@ -1477,6 +1613,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 				{0xb5367df1, 0xcbac, 0x11cf, {0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92}, "AcceptEx"},
 				{0xb5367df2, 0xcbac, 0x11cf, {0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92}, "GetAcceptExSockaddrs"},
 				{0x7fda2e11, 0x8630, 0x436f, {0xa0, 0x31, 0xf5, 0x36, 0xa6, 0xee, 0xc1, 0x57}, "DisconnectEx"},
+				{0xa441e712, 0x754f, 0x43ca, {0x84, 0xa7, 0x0d, 0xee, 0x44, 0xcf, 0x60, 0x6d}, "WSASendMsg"},
 			};
 			const auto guid = call.read(call[2], 16);
 			const char *name = nullptr;
@@ -1510,7 +1647,7 @@ void register_winsock_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		if (call[6])
-			call.store<uint32_t>(call[6], code == fionread ? 4 : 0);
+			call.store<uint32_t>(call[6], code == fionread ? 4 : code == sio_get_extension_function ? uint32_t(call.pointer_width()) : 0);
 		call.ret(0);
 	});
 

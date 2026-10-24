@@ -1,4 +1,7 @@
 #include "inherit.h"
+#include "access_token.h"
+#include "event.h"
+#include "mutex.h"
 
 #include "file_objects.h"
 #include "kernel_context.h"
@@ -99,6 +102,12 @@ std::vector<InheritedHandle> parse_inherited(std::span<const uint8_t> bytes)
 // The object a description stands for, rebuilt around the descriptor that came with it; null for a kind that cannot travel.
 std::shared_ptr<KernelObject> object_from_record(const InheritedHandle &item)
 {
+	if (item.kind == "mutex")
+		return std::make_shared<MutexObject>(item.descriptor);
+	if (item.kind == "event")
+		return std::make_shared<EventObject>(item.descriptor);
+	if (item.kind == "token")
+		return std::make_shared<AccessToken>(item.descriptor);
 	if (item.kind == "file") {
 		// The creator keeps the duty to delete a file that closes with its last handle.
 		return std::make_shared<FileObject>(item.descriptor, item.access, item.bits & 1, std::filesystem::path(item.path), item.text, item.flags & ~0x04000000U);
@@ -136,7 +145,7 @@ void adopt_inherited(NativeObjects &objects, const std::vector<InheritedHandle> 
 		}
 		if (!objects.adopt(item.handle, object, true))
 			throw std::runtime_error("inherited handle value is taken");
-		if (item.handle_access)
+		if (item.handle_access || item.kind == "token" || item.kind == "event" || item.kind == "mutex")
 			objects.set_access(item.handle, item.handle_access);
 	}
 }

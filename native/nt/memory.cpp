@@ -337,8 +337,11 @@ std::map<uint64_t,NativeMemory::Image>::iterator NativeMemory::image_of(uint64_t
 NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_t access)
 {
 	settle();
+	if (!range(address,size,user_limit))
+		return {0,0,invalid};
 	if (const auto image=image_of(address,size); image!=images.end() && region(address & ~uint64_t(4095),1)==regions.end()) {
-		const auto permissions=protection(access);
+		// Image storage belongs to this process, including a writable copy requested for an interception patch.
+		const auto permissions=protection(access==8 ? 4 : access==0x80 ? 0x40 : access);
 		if (permissions<0)
 			return {0,0,0xc0000045U};
 		const auto base=address & ~uint64_t(4095), length=(size+address-base+4095)&~uint64_t(4095);
@@ -348,8 +351,6 @@ NativeMemoryRange NativeMemory::protect(uint64_t address, uint64_t size, uint32_
 			image->second.pages[page-image->first]=access;
 		return {base,length,0,previous};
 	}
-	if (!range(address,size,user_limit))
-		return {0,0,invalid};
 	const auto permissions=protection(access);
 	if (permissions<0)
 		return {0,0,0xc0000045U};
@@ -447,10 +448,17 @@ bool NativeMemory::dispatch(std::string_view name)
 	const bool alloc=name=="VirtualAlloc" || name=="NtAllocateVirtualMemory";
 	const bool release=name=="VirtualFree" || name=="NtFreeVirtualMemory";
 	const bool change=name=="VirtualProtect" || name=="NtProtectVirtualMemory";
-	const bool inspect=name=="VirtualQuery" || name=="NtQueryVirtualMemory";
+	// Other process handles are served by the process API through their owner's channel.
+	const bool ex=name=="VirtualQueryEx";
+	const bool inspect=name=="VirtualQuery" || name=="NtQueryVirtualMemory" || ex;
 	if (!alloc && !release && !change && !inspect)
 		return false;
-	const auto args=process.api_arguments(nt ? (alloc || inspect ? 6 : change ? 5 : 4) : alloc || change ? 4 : 3);
+	auto args=process.api_arguments(nt ? (alloc || inspect ? 6 : change ? 5 : 4) : alloc || change || ex ? 4 : 3);
+	const bool foreign=ex && args[0]!=UINT64_MAX;
+	if (foreign)
+		return false;
+	if (ex)
+		args.erase(args.begin());
 	uint64_t result=0;
 	uint32_t status=0;
 	try {

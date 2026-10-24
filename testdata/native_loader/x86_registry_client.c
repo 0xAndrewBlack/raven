@@ -27,6 +27,7 @@ int raven_entry(void)
 		RegCloseKey(again);
 		return 0;
 	}
+	if (RegDisablePredefinedCache() || RegDisablePredefinedCacheEx()) return 18;
 	if (RegOpenKeyExA(HKEY_CURRENT_USER,"Software\\Raven\\Missing",0,KEY_READ,&key)!=ERROR_FILE_NOT_FOUND) return 10;
 	if (RegOpenKeyExA(HKEY_CURRENT_USER,"Software\\Raven\\Contract",0,KEY_READ,&key) || !key) return 11;
 	size=sizeof(number);

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cerrno>
 #include <fcntl.h>
 #include <optional>
 #include <set>
@@ -404,9 +405,10 @@ struct WaylandPresentation::State {
 		const auto flushed=wl_display_flush(display);
 		pollfd socket{wl_display_get_fd(display),short(POLLIN | (flushed<0 ? POLLOUT : 0)),0};
 		const auto ready=poll(&socket,1,int(budget.count()));
+		const auto polling_error=ready<0 ? errno : 0;
 		if (ready<=0 || !(socket.revents & POLLIN)) wl_display_cancel_read(display);
 		else if (wl_display_read_events(display)<0) throw std::runtime_error("Wayland socket read failed");
-		if (ready<0 || (socket.revents & (POLLERR|POLLHUP|POLLNVAL)) || wl_display_dispatch_pending(display)<0)
+		if ((ready<0 && polling_error!=EINTR) || (socket.revents & (POLLERR|POLLHUP|POLLNVAL)) || wl_display_dispatch_pending(display)<0)
 			throw std::runtime_error("Wayland connection failed");
 		if (input_failed) throw std::runtime_error(input_error);
 	}

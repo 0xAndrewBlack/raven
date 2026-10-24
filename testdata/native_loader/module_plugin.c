@@ -2,6 +2,8 @@
 
 /* A library a program keeps in a folder of its own, as installer bootstrappers keep their user interface. */
 
+static volatile int plugin_value = 42;
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 {
 	return TRUE;
@@ -9,5 +11,5 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 
 __declspec(dllexport) int plugin_answer(void)
 {
-	return 42;
+	return plugin_value;
 }

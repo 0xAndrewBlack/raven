@@ -214,18 +214,30 @@ void register_shell_api(ApiRegistry &registry, KernelContext &context)
 		call.put_wide(call[1], text, 260);
 		call.ret(1);
 	});
-	registry.add("SHGetSpecialFolderPathW", 4, [&paths](ApiCall &call) {
-		const int csidl = call.i32(2);
-		const auto location = folder_for(csidl, paths.user_profile(), call.process.mode() == NativeMode::x86);
-		if (!location) {
-			call.ret(0);
-			return;
-		}
-		if (const auto resolved = paths.resolve(*location); resolved && call.u32(3))
-			std::filesystem::create_directories(resolved->host);
-		call.put_wide(call[1], *location, 260);
-		call.ret(1);
-	});
+	for (const bool ansi : {false, true})
+		registry.add(ansi ? "SHGetSpecialFolderPathA" : "SHGetSpecialFolderPathW", 4, [&paths, ansi](ApiCall &call) {
+			const int csidl = call.i32(2);
+			const auto location = folder_for(csidl, paths.user_profile(), call.process.mode() == NativeMode::x86);
+			if (!location) {
+				call.ret(0);
+				return;
+			}
+			if (call.u32(3)) {
+				const auto resolved = paths.resolve(*location);
+				std::error_code error;
+				if (resolved)
+					std::filesystem::create_directories(resolved->host, error);
+				if (!resolved || error) {
+					call.ret(0);
+					return;
+				}
+			}
+			if (ansi)
+				call.put_narrow(call[1], to_ansi(*location, 1252), 260);
+			else
+				call.put_wide(call[1], *location, 260);
+			call.ret(1);
+		});
 	registry.add("SHCreateDirectory", 2, [&paths](ApiCall &call) {
 		const auto resolved = paths.resolve(call.wide(call[1]));
 		if (!resolved) {

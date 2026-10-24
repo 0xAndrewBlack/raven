@@ -18,6 +18,7 @@ namespace raven {
 class ProcessObject : public KernelObject {
 public:
 	std::u16string_view type_name() const override { return u"Process"; }
+	uint32_t default_access() const override { return 0x1fffff; }
 	explicit ProcessObject(pid_t pid, bool foreign = false) : pid(pid), foreign(foreign) {}
 	~ProcessObject() override;
 	// Waiting for a process succeeds once it has ended; the host reports that, not another guest thread.
@@ -49,6 +50,7 @@ private:
 class SelfProcessObject : public KernelObject {
 public:
 	std::u16string_view type_name() const override { return u"Process"; }
+	uint32_t default_access() const override { return 0x1fffff; }
 	int signaled(uint32_t) const override { return 0; }
 };
 
@@ -56,12 +58,16 @@ public:
 bool runtime_process_alive(pid_t pid);
 // The children that are still known by their process id, and the ones alive.
 std::shared_ptr<ProcessObject> find_child(pid_t pid);
+// Keeps the channel owners alive while queued transfers and requests are consumed, including a child's final messages.
+std::vector<std::shared_ptr<ProcessObject>> retained_children();
 std::vector<std::shared_ptr<ProcessObject>> live_children();
 
 // The main thread of a child process: signaled when the process has ended.
 class ChildThreadObject : public KernelObject {
 public:
 	std::u16string_view type_name() const override { return u"Thread"; }
+	uint32_t default_access() const override { return 0x1fffff; }
+	const std::shared_ptr<ProcessObject> &owner() const { return process; }
 	explicit ChildThreadObject(std::shared_ptr<ProcessObject> process) : process(std::move(process)) {}
 	int signaled(uint32_t) const override { return process->exited() ? 1 : 0; }
 	// A thread started suspended waits at a gate; this opens it and returns the suspend count it had.
@@ -104,6 +110,8 @@ struct ChildLaunch {
 
 // Starts the child; null with the Windows error in `error` when the host could not.
 std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &error);
+// Serve the creator's requests while the primary thread waits for ResumeThread.
+void wait_suspended_process(int descriptor, NativeObjects &objects);
 // True while any child has not been reaped yet: guest threads then wait on the host rather than on each other.
 bool children_running();
 // A guest thread that waits for something only the host can deliver, such as network data, counts for as long as the object lives.

@@ -3,6 +3,7 @@
 #include "objects.h"
 
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -10,6 +11,7 @@
 namespace raven {
 
 class CompletionPort;
+class FindObject;
 
 // An open file or directory; the host descriptor carries the Windows file pointer.
 class FileObject : public KernelObject {
@@ -29,6 +31,9 @@ public:
 	std::filesystem::path path;
 	std::u16string dos_path;
 	uint32_t flags;
+	std::mutex directory_mutex;
+	std::shared_ptr<FindObject> directory_scan;
+	std::u16string directory_pattern;
 	bool describe(InheritedHandle &record) const override
 	{
 		if (descriptor < 0)
@@ -58,6 +63,7 @@ public:
 		std::u16string name;
 		uint32_t attributes;
 		uint64_t creation, access, write, size;
+		uint64_t allocation = 0;
 	};
 	std::vector<Entry> entries;
 	size_t next = 0;

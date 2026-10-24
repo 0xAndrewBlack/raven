@@ -1,4 +1,5 @@
 #include "host_names.h"
+#include "firmware.h"
 #include "kernel_context.h"
 #include "section.h"
 #include "security_attributes.h"
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <sys/file.h>
 #include <sys/mman.h>
@@ -255,6 +257,26 @@ void register_memory_api(ApiRegistry &registry, KernelContext &context)
 		const uint64_t values[] = {16ULL << 30, 8ULL << 30, 32ULL << 30, 16ULL << 30, 0x7fffffe0000ULL, 0x7fffff00000ULL, 0};
 		std::memcpy(bytes.data() + 8, values, 56);
 		call.write(call[0], bytes);
+		call.ret(1);
+	});
+	registry.add("GetPhysicallyInstalledSystemMemory", 1, [](ApiCall &call) {
+		if (!call[0]) {
+			call.fail(87);
+			return;
+		}
+		std::ifstream file("/sys/firmware/dmi/tables/DMI", std::ios::binary);
+		if (!file) {
+			call.fail(50);
+			return;
+		}
+		const std::vector<uint8_t> table(std::istreambuf_iterator<char>(file), {});
+		const uint64_t memory = smbios_memory(table);
+		const long pages = sysconf(_SC_PHYS_PAGES), page_size = sysconf(_SC_PAGESIZE);
+		if (file.bad() || !memory || pages <= 0 || page_size <= 0 || memory < uint64_t(pages) * uint64_t(page_size) / 1024) {
+			call.fail(13);
+			return;
+		}
+		call.store<uint64_t>(call[0], memory);
 		call.ret(1);
 	});
 	// MEMORYSTATUS: the same figures in SIZE_T fields; a 32-bit program sees them capped as Windows caps them, at 4 GiB less a byte for

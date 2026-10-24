@@ -13,6 +13,7 @@
 #include <fstream>
 #include <sys/mman.h>
 #include <map>
+#include <new>
 #include <sstream>
 #include <unistd.h>
 
@@ -34,9 +35,14 @@ public:
 		uint32_t size;
 		std::u16string name, path;
 	};
+	struct Thread {
+		uint32_t id, owner;
+		int32_t priority;
+	};
 	std::vector<Process> processes;
 	std::vector<Module> modules;
-	size_t next_process = 0, next_module = 0;
+	std::vector<Thread> threads;
+	size_t next_process = 0, next_module = 0, next_thread = 0;
 };
 
 // Window stations and desktops are named containers that windows would live in; here every window lives on the one display, so these only
@@ -110,6 +116,58 @@ static uint32_t granted_access(std::u16string_view type, uint32_t requested)
 	return granted;
 }
 
+static InheritedHandle local_process_information(KernelContext &context, uint32_t information, size_t width)
+{
+	InheritedHandle answer;
+	if (width != 4 && width != 8) {
+		answer.access = 0xc000000dU;
+		return answer;
+	}
+	std::vector<uint8_t> data;
+	const auto put = [&](size_t offset, uint64_t value, size_t size) {
+		std::memcpy(data.data() + offset, &value, size);
+	};
+	switch (information) {
+	case 0: {
+		if (width == 4 && context.environment.peb() > UINT32_MAX) {
+			answer.access = 0xc00000bbU;
+			return answer;
+		}
+		const auto processors = std::clamp<long>(::sysconf(_SC_NPROCESSORS_ONLN), 1, width * 8);
+		const uint64_t affinity = processors == 64 ? UINT64_MAX : (uint64_t(1) << processors) - 1;
+		data.assign(6 * width, 0);
+		put(0, 259, 4);
+		put(width, context.environment.peb(), width);
+		put(2 * width, affinity, width);
+		put(3 * width, 8, 4);
+		put(4 * width, uint32_t(::getpid()), width);
+		put(5 * width, uint32_t(::getppid()), width);
+		break;
+	}
+	case 7: data.assign(width, 0); break;
+	case 20:
+		data.assign(4, 0);
+		put(0, context.objects.count(), 4);
+		break;
+	case 26:
+		data.assign(width, 0);
+		put(0, context.process.mode() == NativeMode::x86 ? context.environment.peb() : 0, width);
+		break;
+	case 29: data.assign(4, 0); break;
+	case 58: {
+		const auto handles = context.objects.values();
+		data.assign(handles.size() * 4, 0);
+		for (size_t index = 0; index < handles.size(); ++index) put(index * 4, handles[index], 4);
+		break;
+	}
+	default:
+		answer.access = 0xc0000003U;
+		return answer;
+	}
+	answer.path.assign(reinterpret_cast<const char *>(data.data()), data.size());
+	return answer;
+}
+
 void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 {
 	auto &objects = context.objects;
@@ -119,33 +177,372 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 	const auto is_self = [&objects](uint64_t handle) {
 		return handle == current_process || handle == 0xffffffffU || objects.object_as<SelfProcessObject>(handle) != nullptr;
 	};
-
-	registry.add("OpenProcess", 3, [&objects](ApiCall &call) {
-		const uint32_t id = call.u32(2);
-		if (id == uint32_t(::getpid())) {
-			const auto made = objects.add_object(std::make_shared<SelfProcessObject>());
-			if (made.status) {
-				call.fail(4, 0);
+	const auto request_process = [&context, &objects](uint64_t handle, InheritedHandle request) -> std::optional<InheritedHandle> {
+		const auto child = objects.object_as<ProcessObject>(handle);
+		if (!child || child->exited())
+			return std::nullopt;
+		auto *channel = child->channel.get();
+		if (!channel && child->pid == ::getppid())
+			channel = parent_channel();
+		const auto peer = channel ? nullptr : process_request_channel(child->pid);
+		if (peer) channel = peer.get();
+		return channel ? channel->request_process(objects, context.threads, std::move(request)) : std::nullopt;
+	};
+	enable_process_requests();
+	objects.process_request = [&context](const InheritedHandle &request) {
+		if (request.kind == "process:threads") {
+			InheritedHandle answer;
+			for (const auto id : context.threads.thread_ids()) {
+				const auto thread = context.threads.find(id);
+				const int32_t priority = int32_t(std::clamp<int64_t>(8LL + thread->priority, 1, 15));
+				answer.path.append(reinterpret_cast<const char *>(&id), sizeof(id));
+				answer.path.append(reinterpret_cast<const char *>(&priority), sizeof(priority));
+			}
+			return answer;
+		}
+		if (request.kind == "process:thread-token-set" || request.kind == "process:thread-token-open") {
+			InheritedHandle answer;
+			const auto thread = context.threads.find(request.flags);
+			if (request.kind == "process:thread-token-set") {
+				const auto token = request.handle ? context.objects.object_as<AccessToken>(request.handle) : nullptr;
+				if (!thread || thread->state == GuestThread::State::done)
+					answer.access = 0xc000004bU;
+				else if (request.handle && !token)
+					answer.access = 0xc0000008U;
+				else if (token && !(context.objects.access_of(request.handle) & 4))
+					answer.access = 0xc0000022U;
+				else if (token && token->data().type != 2)
+					answer.access = 0xc00000a8U;
+				else
+					thread->impersonation = token;
+				if (token) context.objects.close(request.handle);
+			} else if (!thread) {
+				answer.access = 0xc0000008U;
+			} else if (!thread->impersonation) {
+				answer.access = 0xc000007cU;
+			} else {
+				thread->impersonation->describe(answer);
+			}
+			return answer;
+		}
+		if (request.kind == "process:token") {
+			InheritedHandle answer;
+			context.process_token->describe(answer);
+			return answer;
+		}
+		if (request.kind == "process:query")
+			return local_process_information(context, uint32_t(request.handle), request.flags);
+		InheritedHandle answer;
+		try {
+			if (request.kind == "process:allocate" || request.kind == "process:free" || request.kind == "process:protect") {
+				if (request.kind == "process:allocate" && request.handle_access == 4 && context.process.mode() != NativeMode::x86) {
+					answer.access = 0xc00000bbU;
+					return answer;
+				}
+				if (request.path.size() != sizeof(uint64_t)) {
+					answer.access = 0xc000000dU;
+					return answer;
+				}
+				uint64_t size;
+				std::memcpy(&size, request.path.data(), sizeof(size));
+				const auto operation = request.kind == "process:allocate" ? context.memory.allocate(request.handle, size, request.flags, request.bits) :
+					request.kind == "process:free" ? context.memory.free(request.handle, size, request.flags) : context.memory.protect(request.handle, size, request.bits);
+				answer.access = operation.status;
+				answer.size = operation.address;
+				answer.flags = operation.previous;
+				answer.path.assign(reinterpret_cast<const char *>(&operation.size), sizeof(operation.size));
+			} else if (request.kind == "process:query-memory") {
+				if (const auto information = context.memory.query(request.handle))
+					answer.path.assign(reinterpret_cast<const char *>(information->data()), information->size());
+				else
+					answer.access = 0xc000000dU;
+			} else if (request.kind == "process:read" && request.flags <= 60000) {
+				const auto data = context.process.read_memory(request.handle, request.flags);
+				answer.path.assign(reinterpret_cast<const char *>(data.data()), data.size());
+			} else if (request.kind == "process:write" && request.path.size() <= 60000) {
+				context.process.write_memory(request.handle, {reinterpret_cast<const uint8_t *>(request.path.data()), request.path.size()});
+			} else {
+				answer.access = 0xc000000dU;
+			}
+		} catch (const std::bad_alloc &) {
+			answer.access = 0xc0000017U;
+		} catch (const std::runtime_error &) {
+			answer.access = 0xc0000005U;
+		}
+		return answer;
+	};
+	const auto open_token = [&context, &objects, is_self, request_process](ApiCall &call, bool native, uint32_t attributes, size_t output) {
+		const auto fail = [&](uint32_t status, uint32_t error) {
+			if (native) call.ret(status);
+			else call.fail(error);
+		};
+		try {
+			call.process.validate_write_memory(call[output], call.pointer_width());
+			const bool own = is_self(call[0]);
+			const auto other = objects.object_as<ProcessObject>(call[0]);
+			if (!own && (!other || other->exited())) {
+				fail(objects.object(call[0]) && !other ? 0xc0000024U : 0xc0000008U, 6);
 				return;
 			}
-			call.ret(made.value);
+			if (call[0] != current_process && call[0] != 0xffffffffU && !(objects.access_of(call[0]) & 0x1400)) {
+				fail(0xc0000022U, 5);
+				return;
+			}
+			const auto access = token_access(call.u32(1));
+			if ((attributes & ~2U) || !access) {
+				fail(0xc000000dU, 87);
+				return;
+			}
+			std::shared_ptr<AccessToken> token = context.process_token;
+			if (!own) {
+				InheritedHandle request;
+				request.kind = "process:token";
+				const auto answer = request_process(call[0], std::move(request));
+				if (!answer || answer->access || answer->descriptor < 0) {
+					if (answer && answer->descriptor >= 0) ::close(answer->descriptor);
+					fail(answer && answer->access ? answer->access : 0xc00000bbU, 50);
+					return;
+				}
+				token = std::make_shared<AccessToken>(answer->descriptor);
+			}
+			const auto made = objects.add_object(token);
+			if (made.status) {
+				fail(made.status, 8);
+				return;
+			}
+			objects.set_access(made.value, *access);
+			objects.set_inherit(made.value, (attributes & 2) != 0);
+			call.store_pointer(call[output], made.value);
+			call.ret(native ? 0 : 1);
+		} catch (const ApiFault &) {
+			fail(0xc0000005U, 998);
+		} catch (const std::runtime_error &) {
+			fail(0xc0000005U, 998);
+		} catch (const std::bad_alloc &) {
+			fail(0xc0000017U, 8);
+		}
+	};
+	registry.add("OpenProcessToken", 3, [open_token](ApiCall &call) { open_token(call, false, 0, 2); });
+	registry.add("NtOpenProcessToken", 3, [open_token](ApiCall &call) { open_token(call, true, 0, 2); });
+	registry.add("NtOpenProcessTokenEx", 4, [open_token](ApiCall &call) { open_token(call, true, call.u32(2), 3); });
+	registry.add("NtQueryInformationProcess", 5, [&context, &objects, is_self, request_process](ApiCall &call) {
+		const bool own = is_self(call[0]);
+		if (!own && !objects.object_as<ProcessObject>(call[0])) {
+			call.ret(0xc0000008U);
 			return;
 		}
-		auto child = find_child(pid_t(id));
-		// Any other running instance of the runtime can be named too: the parent that started this process, or a process a sibling started.
-		if (!child && runtime_process_alive(pid_t(id)))
-			child = std::make_shared<ProcessObject>(pid_t(id), true);
-		if (!child) {
-			call.fail(87, 0);
+		if (call[0] != current_process && call[0] != 0xffffffffU && !(objects.access_of(call[0]) & 0x1400)) {
+			call.ret(0xc0000022U);
 			return;
 		}
-		const auto made = objects.add_object(child);
-		if (made.status) {
-			call.fail(4, 0);
+		InheritedHandle request;
+		request.kind = "process:query";
+		request.handle = call.u32(1);
+		request.flags = uint32_t(call.pointer_width());
+		const auto answer = own ? std::optional(local_process_information(context, call.u32(1), call.pointer_width())) : request_process(call[0], request);
+		if (!answer || answer->access) {
+			call.ret(answer ? answer->access : 0xc0000001U);
 			return;
 		}
-		call.ret(made.value);
+		try {
+			// ProcessHandleTable returns the handle values that fit, in 32-bit entries even for a 64-bit caller.
+			const size_t size = call.u32(1) == 58 ? std::min(answer->path.size(), size_t(call.u32(3) & ~3U)) : answer->path.size();
+			if (call[4])
+				call.store<uint32_t>(call[4], uint32_t(size));
+			if (call.u32(3) < size) {
+				call.ret(0xc0000004U);
+				return;
+			}
+			if (!call[2] && size) {
+				call.ret(0xc0000005U);
+				return;
+			}
+			call.write(call[2], {reinterpret_cast<const uint8_t *>(answer->path.data()), size});
+			call.ret(0);
+		} catch (const ApiFault &) {
+			call.ret(0xc0000005U);
+		}
 	});
+	registry.add("GetProcessHandleCount", 2, [&registry](ApiCall &call) {
+		const auto query = registry.find("NtQueryInformationProcess");
+		ApiCall inner(call.process, call.environment, {call[0], 20, call[1], 4, 0});
+		query->second(inner);
+		if (!inner.result) {
+			call.ret(1);
+			return;
+		}
+		const uint32_t status = uint32_t(inner.result);
+		call.fail(status == 0xc0000008U ? 6 : status == 0xc0000022U ? 5 : status == 0xc0000005U ? 998 : 50);
+	});
+	const auto memory_operation = [&objects, is_self, request_process](ApiCall &call, std::string_view kind) {
+		const bool own = is_self(call[0]);
+		if (!own && !objects.object_as<ProcessObject>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		if (call[0] != current_process && call[0] != 0xffffffffU && !(objects.access_of(call[0]) & 8)) {
+			call.fail(5);
+			return;
+		}
+		const bool allocate = kind == "process:allocate", protect = kind == "process:protect";
+		if (protect) {
+			if (!call[4]) {
+				call.fail(87);
+				return;
+			}
+			call.process.validate_write_memory(call[4], 4);
+			if (own) {
+				const uint64_t base = call[1] & ~uint64_t(4095), offset = call[1] - base;
+				if (call[2] > UINT64_MAX - offset - 4095) {
+					call.fail(87);
+					return;
+				}
+				const uint64_t length = (call[2] + offset + 4095) & ~uint64_t(4095);
+				if (call[4] >= base ? call[4] - base < length : base - call[4] < 4) {
+					call.fail(50);
+					return;
+				}
+			}
+		}
+		InheritedHandle request;
+		request.kind = kind;
+		request.handle = call[1];
+		request.flags = call.u32(3);
+		request.bits = call.u32(allocate ? 4 : 3);
+		request.handle_access = uint32_t(call.pointer_width());
+		const uint64_t size = call[2];
+		request.path.assign(reinterpret_cast<const char *>(&size), sizeof(size));
+		const auto answer = own ? std::optional(objects.process_request(request)) : request_process(call[0], request);
+		if (!answer || answer->access) {
+			const uint32_t status = answer ? answer->access : 0xc0000001U;
+			call.fail(status == 0xc0000017U ? 8 : status == 0xc0000018U || status == 0xc000002dU ? 487 : status == 0xc00000bbU ? 50 : 87);
+			return;
+		}
+		if (protect)
+			call.store<uint32_t>(call[4], answer->flags);
+		call.ret(allocate ? answer->size : 1);
+	};
+	registry.add("VirtualAllocEx", 5, [memory_operation](ApiCall &call) { memory_operation(call, "process:allocate"); });
+	registry.add("VirtualFreeEx", 4, [memory_operation](ApiCall &call) { memory_operation(call, "process:free"); });
+	registry.add("VirtualProtectEx", 5, [memory_operation](ApiCall &call) { memory_operation(call, "process:protect"); });
+	registry.add("VirtualQueryEx", 4, [&objects, is_self, request_process](ApiCall &call) {
+		const bool own = is_self(call[0]);
+		if (!own && !objects.object_as<ProcessObject>(call[0])) {
+			call.fail(6);
+			return;
+		}
+		if (call[0] != current_process && call[0] != 0xffffffffU && !(objects.access_of(call[0]) & 0x400)) {
+			call.fail(5);
+			return;
+		}
+		const size_t size = call.pointer_width() == 8 ? 48 : 28;
+		if (call[3] < size) {
+			call.fail(24);
+			return;
+		}
+		InheritedHandle request;
+		request.kind = "process:query-memory";
+		request.handle = call[1];
+		const auto answer = own ? std::optional(objects.process_request(request)) : request_process(call[0], request);
+		if (!answer || answer->access || answer->path.size() != 48) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint8_t> data(size);
+		if (size == 48) {
+			std::memcpy(data.data(), answer->path.data(), size);
+		} else {
+			constexpr size_t offsets[] = {0, 8, 16, 24, 32, 36, 40};
+			for (const auto offset : {0, 8, 24}) {
+				uint64_t value;
+				std::memcpy(&value, answer->path.data() + offset, 8);
+				if (value > UINT32_MAX) {
+					call.fail(50);
+					return;
+				}
+			}
+			for (size_t index = 0; index < 7; ++index)
+				std::memcpy(data.data() + index * 4, answer->path.data() + offsets[index], 4);
+		}
+		call.write(call[2], data);
+		call.ret(size);
+	});
+
+	const auto open_process = [&objects](uint32_t id, uint32_t access, bool inherit) -> NativeObjectResult {
+		if (!id || id > INT32_MAX)
+			return {0, 0xc000000bU};
+		if (access & ~0xf21fffffU)
+			return {0, 0xc000000dU};
+		std::shared_ptr<KernelObject> object;
+		if (id == uint32_t(::getpid())) {
+			object = std::make_shared<SelfProcessObject>();
+		} else {
+			object = find_child(pid_t(id));
+			if (!object && runtime_process_alive(pid_t(id)))
+				object = std::make_shared<ProcessObject>(pid_t(id), true);
+		}
+		if (!object)
+			return {0, 0xc000000bU};
+		const auto made = objects.add_object(object);
+		if (!made.status) {
+			objects.set_access(made.value, granted_access(u"Process", access));
+			objects.set_inherit(made.value, inherit);
+		}
+		return made;
+	};
+	registry.add("OpenProcess", 3, [open_process](ApiCall &call) {
+		const auto made = open_process(call.u32(2), call.u32(0), call.u32(1) != 0);
+		if (made.status)
+			call.fail(made.status == 0xc000000bU || made.status == 0xc000000dU ? 87 : 4);
+		else
+			call.ret(made.value);
+	});
+	registry.add("NtOpenProcess", 4, [open_process, &context](ApiCall &call) {
+		try {
+			call.process.validate_write_memory(call[0], call.pointer_width());
+			if (!call[3]) {
+				call.ret(0xc0000030U);
+				return;
+			}
+			uint32_t attributes = 0;
+			if (call[2]) {
+				const size_t width = call.pointer_width(), root_at = width == 8 ? 8 : 4;
+				if (call.load<uint32_t>(call[2]) != (width == 8 ? 48 : 24) || call.load_pointer(call[2] + root_at)) {
+					call.ret(0xc000000dU);
+					return;
+				}
+				if (call.load_pointer(call[2] + root_at + width)) {
+					call.ret(0xc0000030U);
+					return;
+				}
+				attributes = call.load<uint32_t>(call[2] + root_at + 2 * width);
+				if (attributes & ~0x42U) {
+					call.ret(0xc00000bbU);
+					return;
+				}
+			}
+			const auto id = call.load_pointer(call[3]), thread = call.load_pointer(call[3] + call.pointer_width());
+			if (id > INT32_MAX) {
+				call.ret(0xc000000bU);
+				return;
+			}
+			if (thread && (id != uint32_t(::getpid()) || thread > UINT32_MAX || !context.threads.find(uint32_t(thread)))) {
+				call.ret(0xc00000bbU);
+				return;
+			}
+			const auto made = open_process(uint32_t(id), call.u32(1), (attributes & 2) != 0);
+			if (!made.status)
+				call.store_pointer(call[0], made.value);
+			call.ret(made.status);
+		} catch (const ApiFault &) {
+			call.ret(0xc0000005U);
+		} catch (const std::runtime_error &) {
+			call.ret(0xc0000005U);
+		} catch (const std::bad_alloc &) {
+			call.ret(0xc0000017U);
+		}
+	});
+
 	// A 32-bit program runs under WOW64 on the 64-bit system; a 64-bit one does not.
 	registry.add("IsWow64Process", 2, [is_self](ApiCall &call) {
 		if (!call[1]) {
@@ -380,7 +777,7 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 		std::vector<const PEModule *> list;
 		list.push_back(&context.entry);
 		for (const auto &[name, module] : modules.all())
-			if (module.get() != &context.entry && !module->runtime_api)
+			if (module.get() != &context.entry)
 				list.push_back(module.get());
 		return list;
 	};
@@ -481,7 +878,7 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 
-	// Toolhelp: the process and module lists. The processes are this one and the children it started that still run.
+	// Toolhelp lists retain the entries present when the snapshot was taken.
 	registry.add("CreateToolhelp32Snapshot", 2, [&objects, &context, module_list](ApiCall &call) {
 		const uint32_t flags = call.u32(0);
 		auto snapshot = std::make_shared<Snapshot>();
@@ -521,6 +918,37 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 					!module->file.empty() ? context.paths.dos(module->file) : context.paths.library_location(context.launch.image_path, name, context.entry.image.is_64);
 				snapshot->modules.push_back({module->loaded.base(), module->image.image_size, name, path});
 			}
+		if (flags & 4) {
+			InheritedHandle request;
+			request.kind = "process:threads";
+			const auto append_threads = [&](uint32_t owner, const InheritedHandle &answer) {
+				if (answer.access || answer.path.size() % 8)
+					return;
+				for (size_t offset = 0; offset < answer.path.size(); offset += 8) {
+					Snapshot::Thread thread{0, owner, 0};
+					std::memcpy(&thread.id, answer.path.data() + offset, 4);
+					std::memcpy(&thread.priority, answer.path.data() + offset + 4, 4);
+					snapshot->threads.push_back(thread);
+				}
+			};
+			append_threads(uint32_t(::getpid()), objects.process_request(request));
+			std::error_code error;
+			for (const auto &entry : std::filesystem::directory_iterator("/proc", error)) {
+				const auto name = entry.path().filename().string();
+				if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; }))
+					continue;
+				const auto pid = pid_t(std::stol(name));
+				if (pid == ::getpid())
+					continue;
+				// A new child already has its parent channel while its process listener is still being initialized.
+				const auto child = find_child(pid);
+				const auto peer = child && child->channel ? nullptr : process_request_channel(pid);
+				auto *channel = child && child->channel ? child->channel.get() : peer.get();
+				if (channel)
+					if (const auto answer = channel->request_process(objects, context.threads, request))
+						append_threads(uint32_t(pid), *answer);
+			}
+		}
 		const auto made = objects.add_object(snapshot);
 		if (made.status) {
 			call.fail(4, UINT64_MAX);
@@ -578,6 +1006,30 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("Process32NextW", 2, [process_step](ApiCall &call) { process_step(call, false, true); });
 	registry.add("Process32First", 2, [process_step](ApiCall &call) { process_step(call, true, false); });
 	registry.add("Process32Next", 2, [process_step](ApiCall &call) { process_step(call, false, false); });
+	const auto thread_step = [&objects](ApiCall &call, bool first) {
+		const auto snapshot = objects.object_as<Snapshot>(call[0]);
+		if (!snapshot || !call[1]) {
+			call.fail(snapshot ? 87 : 6);
+			return;
+		}
+		if (call.load<uint32_t>(call[1]) < 28) {
+			call.fail(24);
+			return;
+		}
+		if (first)
+			snapshot->next_thread = 0;
+		if (snapshot->next_thread >= snapshot->threads.size()) {
+			call.fail(18);
+			return;
+		}
+		const auto &thread = snapshot->threads[snapshot->next_thread];
+		const uint32_t entry[] = {28, 0, thread.id, thread.owner, uint32_t(thread.priority), 0, 0};
+		call.write(call[1], {reinterpret_cast<const uint8_t *>(entry), sizeof(entry)});
+		++snapshot->next_thread;
+		call.ret(1);
+	};
+	registry.add("Thread32First", 2, [thread_step](ApiCall &call) { thread_step(call, true); });
+	registry.add("Thread32Next", 2, [thread_step](ApiCall &call) { thread_step(call, false); });
 	// MODULEENTRY32: the base and size, the module handle, then the module name and the full path.
 	const auto module_step = [&objects](ApiCall &call, bool first, bool wide) {
 		const auto snapshot = objects.object_as<Snapshot>(call[0]);
@@ -756,24 +1208,71 @@ void register_process_info_api(ApiRegistry &registry, KernelContext &context)
 				call.put_narrow(call[2], to_utf8(device.substr(0, capacity - 1)), capacity);
 			call.ret(std::min(device.size(), capacity - 1));
 		});
-	// Reading memory works on this process; another process's memory lies in another host process the runtime does not reach.
-	registry.add("ReadProcessMemory", 5, [is_self](ApiCall &call) {
+	const auto copy_process_memory = [&objects, is_self, request_process](ApiCall &call, bool write, bool native) {
 		if (call[4])
 			call.store_pointer(call[4], 0);
-		if (!is_self(call[0])) {
-			call.fail(5);
+		const auto fail = [&](uint32_t status, uint32_t error) {
+			if (native)
+				call.ret(status);
+			else
+				call.fail(error);
+		};
+		const bool own = is_self(call[0]);
+		if (!own && !objects.object_as<ProcessObject>(call[0])) {
+			fail(0xc0000008U, 6);
 			return;
 		}
-		try {
-			const auto bytes = call.read(call[1], call[3]);
-			call.write(call[2], bytes);
-		} catch (const ApiFault &) {
-			call.fail(299);
+		const uint32_t access = write ? 0x28 : 0x10;
+		if (call[0] != current_process && call[0] != 0xffffffffU && (objects.access_of(call[0]) & access) != access) {
+			fail(0xc0000022U, 5);
 			return;
+		}
+		uint64_t copied = 0;
+		bool failed = call[3] > UINT64_MAX - call[1] || call[3] > UINT64_MAX - call[2];
+		while (!failed && copied < call[3]) {
+			const auto count = size_t(std::min<uint64_t>(60000, call[3] - copied));
+			try {
+				if (own) {
+					const auto bytes = call.read((write ? call[2] : call[1]) + copied, count);
+					call.write((write ? call[1] : call[2]) + copied, bytes);
+				} else {
+					InheritedHandle request;
+					request.kind = write ? "process:write" : "process:read";
+					request.handle = call[1] + copied;
+					request.flags = uint32_t(count);
+					if (write) {
+						const auto bytes = call.read(call[2] + copied, count);
+						request.path.assign(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+					}
+					const auto answer = request_process(call[0], std::move(request));
+					if (!answer || answer->access || (!write && answer->path.size() != count)) {
+						failed = true;
+						break;
+					}
+					if (!write)
+						call.write(call[2] + copied, {reinterpret_cast<const uint8_t *>(answer->path.data()), answer->path.size()});
+				}
+				copied += count;
+			} catch (const ApiFault &) {
+				failed = true;
+			}
 		}
 		if (call[4])
-			call.store_pointer(call[4], call[3]);
-		call.ret(1);
+			call.store_pointer(call[4], copied);
+		if (failed)
+			fail(0x8000000dU, 299);
+		else
+			call.ret(native ? 0 : 1);
+	};
+	registry.add("ReadProcessMemory", 5, [copy_process_memory](ApiCall &call) { copy_process_memory(call, false, false); });
+	registry.add("WriteProcessMemory", 5, [copy_process_memory](ApiCall &call) { copy_process_memory(call, true, false); });
+	registry.add("NtReadVirtualMemory", 5, [copy_process_memory](ApiCall &call) {
+		try { copy_process_memory(call, false, true); }
+		catch (const ApiFault &) { call.ret(0xc0000005U); }
+	});
+	registry.add("NtWriteVirtualMemory", 5, [copy_process_memory](ApiCall &call) {
+		try { copy_process_memory(call, true, true); }
+		catch (const ApiFault &) { call.ret(0xc0000005U); }
 	});
 	// What the object manager tells about a handle: the basic record, the name (objects here have none), the type and the handle flags.
 	registry.add("NtQueryObject", 5, [&objects](ApiCall &call) {

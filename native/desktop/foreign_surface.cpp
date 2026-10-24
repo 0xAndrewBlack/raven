@@ -115,7 +115,7 @@ std::optional<std::pair<uint32_t, uint32_t>> foreign_window_size(uint64_t window
 		return std::nullopt;
 	if (::kill(pid_t(owner), 0) != 0 && errno == ESRCH)
 		return std::nullopt;
-	return std::make_pair(std::max<uint32_t>(width, 1), std::max<uint32_t>(height, 1));
+	return std::make_pair(width, height);
 }
 
 std::shared_ptr<ForeignSurface> ForeignSurface::open_for_drawing(uint64_t window, uint32_t width, uint32_t height)

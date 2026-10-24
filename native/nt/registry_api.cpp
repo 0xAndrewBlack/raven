@@ -587,6 +587,9 @@ void register_registry_api(ApiRegistry &registry, KernelContext &context, Native
 		call.ret(status);
 	});
 	registry.add("RegFlushKey", 1, [](ApiCall &call) { call.ret(0); });
+	// Predefined keys are resolved for each operation; no cached handles need invalidating.
+	registry.add("RegDisablePredefinedCache", 0, [](ApiCall &call) { call.ret(0); });
+	registry.add("RegDisablePredefinedCacheEx", 0, [](ApiCall &call) { call.ret(0); });
 	registry.add("RegNotifyChangeKeyValue", 5, [](ApiCall &call) { call.ret(0); });
 	registry.add("RegOpenCurrentUser", 2, [put_handle](ApiCall &call) {
 		put_handle(call, call[1], 0x80000001ULL);

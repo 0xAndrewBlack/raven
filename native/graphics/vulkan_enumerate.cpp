@@ -25,10 +25,21 @@ struct Offer {
 	const char *host;
 };
 
-constexpr Offer instance_offers[] = {{"VK_KHR_surface", 25, "VK_KHR_surface"}, {"VK_KHR_win32_surface", 6, "VK_KHR_wayland_surface"}};
+constexpr Offer instance_offers[] = {
+	{"VK_KHR_surface", 25, "VK_KHR_surface"}, {"VK_KHR_win32_surface", 6, "VK_KHR_wayland_surface"},
+#ifdef RAVEN_VULKAN_GENERATED
+	{"VK_KHR_get_physical_device_properties2", 2, "VK_KHR_get_physical_device_properties2"},
+#endif
+};
 // Besides the swapchain, the extensions offered here only add feature and property structures, so offering them needs no commands.
 constexpr Offer device_offers[] = {
 	{"VK_KHR_swapchain", 70, "VK_KHR_swapchain"},
+#ifdef RAVEN_VULKAN_GENERATED
+	{"VK_KHR_maintenance1", 0, "VK_KHR_maintenance1"},
+	{"VK_KHR_create_renderpass2", 0, "VK_KHR_create_renderpass2"},
+	{"VK_KHR_imageless_framebuffer", 0, "VK_KHR_imageless_framebuffer"},
+	{"VK_KHR_descriptor_update_template", 0, "VK_KHR_descriptor_update_template"},
+#endif
 	{"VK_EXT_depth_clip_enable", 1, "VK_EXT_depth_clip_enable"},
 	{"VK_EXT_robustness2", 1, "VK_EXT_robustness2"},
 	{"VK_EXT_custom_border_color", 12, "VK_EXT_custom_border_color"},
@@ -58,6 +69,7 @@ constexpr Offer device_offers[] = {
 	{"VK_EXT_image_view_min_lod", 0, "VK_EXT_image_view_min_lod"},
 	{"VK_EXT_image_sliced_view_of_3d", 0, "VK_EXT_image_sliced_view_of_3d"},
 	{"VK_EXT_mutable_descriptor_type", 0, "VK_EXT_mutable_descriptor_type"},
+	{"VK_EXT_descriptor_buffer", 0, "VK_EXT_descriptor_buffer"},
 	{"VK_VALVE_mutable_descriptor_type", 0, "VK_VALVE_mutable_descriptor_type"},
 	{"VK_KHR_push_descriptor", 0, "VK_KHR_push_descriptor"},
 	{"VK_EXT_pageable_device_local_memory", 0, "VK_EXT_pageable_device_local_memory"},
@@ -145,6 +157,9 @@ bool VulkanBridge::host_extension_names(const std::vector<std::string> &guest, b
 				// A surface type needs the base surface extension next to it.
 				if (!device && std::strcmp(offer.host, "VK_KHR_surface") && std::find(host.begin(), host.end(), "VK_KHR_surface") == host.end())
 					host.push_back("VK_KHR_surface");
+				if (!device && name=="VK_KHR_win32_surface" && has(available,"VK_EXT_headless_surface") &&
+					std::find(host.begin(),host.end(),"VK_EXT_headless_surface")==host.end())
+					host.push_back("VK_EXT_headless_surface");
 			}
 		if (!found)
 			return false;

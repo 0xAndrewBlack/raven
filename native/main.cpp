@@ -195,7 +195,10 @@ int main(int argc, char **argv)
 		if (option.starts_with("--command-line=")) command_line_text=std::string(option.substr(15));
 		else if (option.starts_with("--directory=")) directory_text=std::string(option.substr(12));
 		else if (option.starts_with("--environment-fd=")) environment_fd=std::atoi(std::string(option.substr(17)).c_str());
-		else if (option.starts_with("--suspended-fd=")) suspended_fd=std::atoi(std::string(option.substr(15)).c_str());
+		else if (option.starts_with("--suspended-fd=")) {
+			suspended_fd=std::atoi(std::string(option.substr(15)).c_str());
+			::fcntl(suspended_fd,F_SETFD,FD_CLOEXEC);
+		}
 		else if (option.starts_with("--inherit-fd=")) inherit_fd=std::atoi(std::string(option.substr(13)).c_str());
 		else if (option.starts_with("--handle-channel-fd=")) handle_channel_fd=std::atoi(std::string(option.substr(20)).c_str());
 #ifdef RAVEN_NATIVE_CPU
@@ -536,6 +539,7 @@ int main(int argc, char **argv)
 						const raven::NativePaths paths(prefix);
 						const auto image=paths.dos(std::filesystem::absolute(argv[first_file]));
 						launch=raven::NativeLaunch{image,raven::launch_command_line(image,arguments)};
+						launch->suspended_fd = suspended_fd;
 						if (command_line_text) launch->command_line=raven::from_utf8(*command_line_text);
 						if (directory_text) launch->directory=raven::from_utf8(*directory_text);
 						if (handle_channel_fd>=0) raven::set_parent_channel(handle_channel_fd);
@@ -564,12 +568,6 @@ int main(int argc, char **argv)
 							launch->environment=std::move(block);
 						}
 						if (inherited_stdio) launch->standard_fds={0,1,2};
-					}
-					if (suspended_fd>=0) {
-						// Started suspended: nothing runs until the parent resumes the thread.
-						char open;
-						while (::read(suspended_fd,&open,1)<0 && errno==EINTR) {}
-						::close(suspended_fd);
 					}
 					if (!entry->image.is_64)
 						return native_result(raven::run_native_process_x86(modules, *entry, bootstrap.string(), timeout, launch, presentation, source),true,inherited_stdio);

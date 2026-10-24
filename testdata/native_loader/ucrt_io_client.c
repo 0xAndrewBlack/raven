@@ -32,6 +32,29 @@ extern size_t strnlen(const char *, size_t);
 extern void *_aligned_malloc(size_t, size_t);
 extern void _aligned_free(void *);
 extern int strcmp(const char *, const char *);
+extern char *_mktemp(char *);
+extern int *_errno(void);
+
+static int temp_names(void)
+{
+	char names[26][32], exhausted[] = "crt-mktemp-XXXXXX", invalid[] = "crt-mktemp-XXXXX";
+	for (int index = 0; index < 26; ++index) {
+		lstrcpyA(names[index], "crt-mktemp-XXXXXX");
+		if (_mktemp(names[index]) != names[index] || names[index][11] != 'a' + index ||
+			GetFileAttributesA(names[index]) != INVALID_FILE_ATTRIBUTES) return 18;
+		HANDLE file = CreateFileA(names[index], GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (file == INVALID_HANDLE_VALUE) return 19;
+		CloseHandle(file);
+	}
+	if (_mktemp(exhausted) || exhausted[0] || *_errno() != 17) return 20;
+	for (int index = 0; index < 26; ++index)
+		if (!DeleteFileA(names[index])) return 21;
+	lstrcpyA(exhausted, "crt-mktemp-XXXXXX");
+	if (_mktemp(exhausted) != exhausted || strcmp(exhausted, names[0])) return 22;
+	if (_mktemp(invalid) || *_errno() != 22 || strcmp(invalid, "crt-mktemp-XXXXX")) return 23;
+	if (_mktemp(NULL) || *_errno() != 22) return 24;
+	return 0;
+}
 
 static int compare(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
 static int close_to(float value, float expected) { float d = value - expected; return d < 0.001f && d > -0.001f; }
@@ -79,5 +102,5 @@ int raven_entry(void)
 		return 16;
 	}
 	if (reached != 1) return 17;
-	return 0;
+	return temp_names();
 }

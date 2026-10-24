@@ -362,7 +362,7 @@ void register_child_process_api(ApiRegistry &registry, KernelContext &context)
 		call.store_pointer(call[9], process_handle.value);
 		call.store_pointer(call[9] + width, thread_handle.value);
 		call.store<uint32_t>(call[9] + 2 * width, uint32_t(child->pid));
-		call.store<uint32_t>(call[9] + 2 * width + 4, uint32_t(child->pid));
+		call.store<uint32_t>(call[9] + 2 * width + 4, 1);
 		call.ret(1);
 	});
 	registry.add("GetExitCodeProcess", 2, [&objects](ApiCall &call) {

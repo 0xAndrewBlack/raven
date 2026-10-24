@@ -69,16 +69,27 @@ constexpr std::array<std::pair<std::string_view, uint32_t>, 115> kernel32_export
 
 // Shared-registry handlers that serve 32-bit programs as they are: every argument is one 32-bit word and no structure holds a pointer.
 constexpr std::array shared_exports{
+	NativeX86System::Export{"kernel32.dll", "GetPhysicallyInstalledSystemMemory", 1},
+	NativeX86System::Export{"ws2_32.dll", "WSASendMsg", 6},
+	NativeX86System::Export{"ntdll.dll", "NtQueryDirectoryFile", 11}, NativeX86System::Export{"ntdll.dll", "ZwQueryDirectoryFile", 11},
 	NativeX86System::Export{"kernel32.dll", "CreateDirectoryW", 2}, NativeX86System::Export{"kernel32.dll", "CreateFileA", 7},
+	NativeX86System::Export{"kernel32.dll", "CreateEventExA", 4}, NativeX86System::Export{"kernel32.dll", "CreateEventExW", 4},
+	NativeX86System::Export{"kernel32.dll", "GetCPInfoExA", 3}, NativeX86System::Export{"kernel32.dll", "GetCPInfoExW", 3},
 	NativeX86System::Export{"kernel32.dll", "CreateFileMappingA", 6}, NativeX86System::Export{"kernel32.dll", "FormatMessageA", 7}, NativeX86System::Export{"kernel32.dll", "GetEnvironmentVariableW", 3},
 	NativeX86System::Export{"kernel32.dll", "GetModuleFileNameW", 3}, NativeX86System::Export{"kernel32.dll", "GetModuleHandleExA", 3},
 	NativeX86System::Export{"kernel32.dll", "GetSystemTimeAsFileTime", 1}, NativeX86System::Export{"kernel32.dll", "GetTempPathA", 2},
 	NativeX86System::Export{"kernel32.dll", "GetTickCount64", 0}, NativeX86System::Export{"kernel32.dll", "LocalFree", 1},
 	NativeX86System::Export{"kernel32.dll", "MapViewOfFile", 5}, NativeX86System::Export{"kernel32.dll", "UnmapViewOfFile", 1},
+	NativeX86System::Export{"user32.dll", "AllowSetForegroundWindow", 1},
+	NativeX86System::Export{"user32.dll", "PeekMessageA", 5},
 	NativeX86System::Export{"user32.dll", "CallWindowProcA", 5}, NativeX86System::Export{"user32.dll", "DestroyCursor", 1},
 	NativeX86System::Export{"user32.dll", "EnumDisplayMonitors", 4}, NativeX86System::Export{"user32.dll", "EnumDisplaySettingsW", 3},
 	NativeX86System::Export{"user32.dll", "GetDCEx", 3}, NativeX86System::Export{"user32.dll", "GetDisplayConfigBufferSizes", 3},
 	NativeX86System::Export{"user32.dll", "GetForegroundWindow", 0}, NativeX86System::Export{"user32.dll", "GetMonitorInfoW", 2},
+	NativeX86System::Export{"user32.dll", "GetRawInputDeviceList", 3},
+	NativeX86System::Export{"user32.dll", "GetRawInputBuffer", 3}, NativeX86System::Export{"user32.dll", "GetRawInputData", 5},
+	NativeX86System::Export{"user32.dll", "RegisterRawInputDevices", 3},
+	NativeX86System::Export{"user32.dll", "GetRawInputDeviceInfoA", 4}, NativeX86System::Export{"user32.dll", "GetRawInputDeviceInfoW", 4},
 	NativeX86System::Export{"user32.dll", "IsIconic", 1}, NativeX86System::Export{"user32.dll", "MonitorFromPoint", 3},
 	NativeX86System::Export{"user32.dll", "OffsetRect", 3}, NativeX86System::Export{"user32.dll", "QueryDisplayConfig", 6},
 	NativeX86System::Export{"gdi32.dll", "CreateBitmap", 5}, NativeX86System::Export{"gdi32.dll", "StretchBlt", 11},
@@ -87,6 +98,9 @@ constexpr std::array shared_exports{
 // More shared handlers a 32-bit program may use as they are; their words come from the registry and their library from the public
 // export lists. Anything with a pointer-width structure, a 64-bit argument or a callback into x64 conventions is not here.
 constexpr std::string_view shared_allowed[] = {
+	"NtQueryInformationProcess", "NtReadVirtualMemory", "NtWriteVirtualMemory", "ReadProcessMemory", "WriteProcessMemory", "OpenProcess",
+	"NtSetInformationThread", "NtOpenThreadToken", "NtOpenThreadTokenEx", "NtOpenThread", "NtOpenProcess", "NtOpenProcessToken", "NtOpenProcessTokenEx", "NtQueryInformationThread", "OpenThread", "GetThreadId",
+	"VirtualAllocEx", "VirtualFreeEx", "VirtualProtectEx", "VirtualQueryEx",
 	"SetDllDirectoryW", "SetDllDirectoryA", "SetConsoleTitleW", "SetConsoleTitleA", "OpenSCManagerW", "OpenSCManagerA", "OpenServiceW", "OpenServiceA", "CreateServiceW", "CreateServiceA",
 	"CloseServiceHandle", "DeleteService", "ChangeServiceConfigW", "ChangeServiceConfig2W", "ChangeServiceConfig2A", "QueryServiceConfigW", "QueryServiceConfigA", "GetServiceDisplayNameW", "GetServiceDisplayNameA",
 	"QueryServiceObjectSecurity", "SetServiceObjectSecurity", "RegQueryInfoKeyA", "RegQueryInfoKeyW", "LookupPrivilegeValueA", "QueryServiceStatus", "QueryServiceStatusEx", "StartServiceW", "ControlService",
@@ -95,7 +109,7 @@ constexpr std::string_view shared_allowed[] = {
 	"SetCurrentDirectoryA", "SetCurrentDirectoryW", "FindFirstFileA", "FindFirstFileW", "FindNextFileA", "FindNextFileW", "FindClose",
 	"CreateDirectoryA", "RemoveDirectoryA", "RemoveDirectoryW", "MoveFileA", "MoveFileW", "CopyFileA", "CopyFileW", "GetLocalTime",
 	"GetSystemTime", "lstrcmpA", "lstrcmpW", "lstrcmpiA", "lstrcmpiW", "lstrcpynA", "lstrcatA", "OutputDebugStringW", "IsDebuggerPresent",
-	"GetLogicalDrives", "GetDriveTypeA", "GetVolumeInformationA", "GetVolumeInformationW", "GetDiskFreeSpaceA", "MulDiv", "GetStringTypeW",
+	"GetLogicalDrives", "GetLogicalDriveStringsA", "GetLogicalDriveStringsW", "GetDriveTypeA", "GetVolumeInformationA", "GetVolumeInformationW", "GetDiskFreeSpaceA", "MulDiv", "GetStringTypeW",
 	"GetStringTypeA", "CompareStringA", "CompareStringW", "LCMapStringA", "LCMapStringW", "GetLocaleInfoA", "GetLocaleInfoW",
 	"GetUserDefaultLCID", "GetSystemDefaultLCID", "GetUserDefaultLangID", "GetSystemDefaultLangID", "GetUserDefaultUILanguage", "GetSystemDefaultUILanguage", "GetThreadUILanguage", "IsValidCodePage", "SetEnvironmentVariableA", "SetEnvironmentVariableW",
 	"ExpandEnvironmentStringsA", "ExpandEnvironmentStringsW", "CreateMutexA", "CreateMutexW", "ReleaseMutex", "GetFileTime", "SetFileTime",
@@ -106,8 +120,8 @@ constexpr std::string_view shared_allowed[] = {
 	"SHGetSpecialFolderLocation", "SHCloneSpecialIDList", "SHGetPathFromIDListW", "SHGetFileInfoW", "SHGetFileInfoA", "ShellExecuteW", "SHFileOperationW",
 	"OleInitialize", "OleUninitialize", "CoTaskMemFree", "CoCreateInstance",
 	"GetTempPathW", "CompareFileTime", "MoveFileExW", "lstrcatW", "lstrcpynW", "GetTempFileNameW", "GetTempFileNameA", "GetDiskFreeSpaceW", "GetExitCodeProcess",
-	"CreateProcessW", "OpenProcessToken", "LookupPrivilegeValueW", "AdjustTokenPrivileges", "SetFileSecurityW",
-	"RegCloseKey", "RegCreateKeyExA", "RegCreateKeyExW", "RegOpenKeyA", "RegOpenKeyW", "RegOpenKeyExA", "RegOpenKeyExW", "RegQueryValueExA",
+	"CreateProcessW", "GetProcessHandleCount", "OpenProcessToken", "LookupPrivilegeValueW", "AdjustTokenPrivileges", "SetFileSecurityW",
+	"RegCloseKey", "RegDisablePredefinedCache", "RegDisablePredefinedCacheEx", "RegCreateKeyExA", "RegCreateKeyExW", "RegOpenKeyA", "RegOpenKeyW", "RegOpenKeyExA", "RegOpenKeyExW", "RegQueryValueExA",
 	"RegQueryValueExW", "RegSetValueExA", "RegSetValueExW", "RegDeleteKeyA", "RegDeleteKeyW", "RegDeleteValueA", "RegDeleteValueW",
 	"RegEnumKeyA", "RegEnumKeyW", "RegEnumKeyExA", "RegEnumKeyExW", "RegEnumValueA", "RegEnumValueW",
 	"GetWindowLongW", "SetWindowLongW", "GetFileVersionInfoA", "GetFileVersionInfoExW", "GetFileVersionInfoSizeA", "GetFileVersionInfoSizeExW",
@@ -115,7 +129,9 @@ constexpr std::string_view shared_allowed[] = {
 	"GetComputerNameW", "FileTimeToSystemTime", "SystemTimeToFileTime", "GetTimeZoneInformation", "GetCurrentProcessId", "SetFileAttributesA",
 	"SetFileAttributesW", "GetLongPathNameA", "GetLongPathNameW", "GetShortPathNameA", "GetShortPathNameW", "SearchPathA", "SearchPathW",
 	"GetModuleFileNameA", "IsDBCSLeadByte", "IsDBCSLeadByteEx", "GetCPInfoExA", "GetThreadLocale", "SetThreadLocale", "VerifyVersionInfoW",
-	"GetUserNameA", "GetUserNameW", "FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue", "SetDefaultDllDirectories", "AddDllDirectory", "RemoveDllDirectory", "SetSearchPathMode", "GetLargePageMinimum", "ConvertDefaultLocale", "GetMachineTypeAttributes", "SHGetFolderPathW", "SHGetFolderPathA", "SHChangeNotify", "SHPathPrepareForWriteW", "ShowOwnedPopups",
+	"GetUserNameA", "GetUserNameW", "FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue", "SetDefaultDllDirectories", "AddDllDirectory", "RemoveDllDirectory", "SetSearchPathMode", "GetLargePageMinimum", "ConvertDefaultLocale", "GetMachineTypeAttributes", "GetShellWindow", "PowerCreateRequest", "PowerSetRequest", "PowerClearRequest", "CreateTransaction", "CommitTransaction", "CommitTransactionAsync",
+	"RollbackTransaction", "RollbackTransactionAsync", "CreateFileTransactedW", "DeleteFileTransactedW", "MoveFileTransactedW", "CopyFileTransactedW",
+	"CreateDirectoryTransactedW", "RemoveDirectoryTransactedW", "GetFileAttributesTransactedW", "SetFileAttributesTransactedW", "SHGetFolderPathW", "SHGetFolderPathA", "SHChangeNotify", "SHPathPrepareForWriteW", "ShowOwnedPopups",
 	"UnrealizeObject", "EnableNonClientDpiScaling", "EnumFontsW", "DisableProcessWindowsGhosting", "ShutdownBlockReasonCreate", "ShutdownBlockReasonDestroy", "WNetOpenEnumW", "WNetOpenEnumA", "WNetEnumResourceW", "WNetEnumResourceA", "WNetCloseEnum", "WNetGetConnectionW",
 	"WNetGetConnectionA", "WNetGetUniversalNameW", "WNetGetUniversalNameA", "SetSearchPathMode",
 	"CreateMutexW", "CreateMutexA", "CreateMutexExW", "OpenMutexW", "OpenMutexA", "ReleaseMutex", "CreateSemaphoreW", "CreateSemaphoreA", "CreateSemaphoreExW", "ReleaseSemaphore",
@@ -755,7 +771,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	}
 	module_api.set_loader([&](std::string name) -> uint64_t {
 		// DONT_RESOLVE_DLL_REFERENCES and the data file and resource flags map the library without starting it.
-		return library_loader.load(std::move(name), module_api.load_flags() & 0x63);
+		return library_loader.load(std::move(name), module_api.load_flags() & 0x63, module_api.load_flags());
 	}, [&](uint64_t handle) -> bool {
 		if (library_loader.release(handle))
 			return true;
@@ -998,21 +1014,18 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 				continue;
 			}
 			if (api == "DuplicateHandle") {
-				// A handle that crosses to or from another process goes through the shared handler, which owns the channels to other
-				// processes; the pseudo handles are widened to their 64-bit values for it.
+				// Local and foreign copies use the same access mapping; pseudo handles widen to the shared handler's values.
 				auto words = process.api_arguments(7);
-				if (words[0] != UINT32_MAX || words[2] != UINT32_MAX) {
-					for (const size_t index : {0, 1, 2})
-						if (words[index] >= 0xfffffffaULL)
-							words[index] |= 0xffffffff00000000ULL;
-					const auto entry = shared_api.find("DuplicateHandle");
-					ApiCall inner(process, environment, words);
-					entry->second(inner);
-					process.return_api(inner.result);
-					budget = remaining();
-					result = process.resume(budget);
-					continue;
-				}
+				for (const size_t index : {0, 1, 2})
+					if (words[index] >= 0xfffffffaULL)
+						words[index] |= 0xffffffff00000000ULL;
+				const auto entry = shared_api.find("DuplicateHandle");
+				ApiCall inner(process, environment, words);
+				entry->second(inner);
+				process.return_api(inner.result);
+				budget = remaining();
+				result = process.resume(budget);
+				continue;
 			}
 			if (api == "TerminateProcess") {
 				const auto words = process.api_arguments(2);
@@ -1109,7 +1122,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, guest_threads, paths, modules, entry, *launch, invoke};
 	guest_threads.set_watched([reactor = kernel.reactor](std::vector<pollfd> &descriptors) { reactor->watch(descriptors); });
 	// Waits that also wake for messages ask the window system, and the window system sleeps as the scheduler does.
-	kernel.message_ready = [&windows](uint32_t thread) { return windows.input_pending(thread); };
+	kernel.queue_status = [&windows](uint32_t thread,uint32_t mask,bool clear) { return windows.queue_status(thread,mask,clear); };
 	windows.set_idle_sources([&guest_threads](std::chrono::steady_clock::time_point limit) { return guest_threads.idle_until(limit); },
 		[&guest_threads](std::vector<pollfd> &descriptors) { guest_threads.idle_descriptors(descriptors); }, [&guest_threads] { guest_threads.drain_wake(); });
 	register_file_api(shared_api, kernel);
@@ -1169,6 +1182,7 @@ NativeResult run_native_process_x86(ModuleSet &modules, PEModule &entry,
 	});
 	crt.set_call(invoke);
 	try {
+		wait_suspended_process(launch->suspended_fd, kernel_objects);
 		// Images of the startup graph with thread local storage get their blocks, and their callbacks hear about the process starting.
 		for (const auto &[name, module] : modules.all())
 			static_tls.add(*module);

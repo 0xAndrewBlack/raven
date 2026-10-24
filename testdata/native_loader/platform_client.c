@@ -2,6 +2,7 @@
 #define INITGUID
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0601
+#define PSAPI_VERSION 2
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -10,6 +11,8 @@
 #include <knownfolders.h>
 #include <sddl.h>
 #include <wincrypt.h>
+#include <aclapi.h>
+#include <psapi.h>
 
 static void clear(void *memory, int length)
 {
@@ -43,6 +46,72 @@ static int contains(const WCHAR *text, const WCHAR *part)
 
 int raven_entry(void)
 {
+	{
+		const UINT requested[] = {CP_ACP, CP_OEMCP, CP_THREAD_ACP, 1252, 437, 850, 28591, 20127, CP_UTF8};
+		for (UINT index = 0; index < sizeof(requested) / sizeof(requested[0]); ++index) {
+			CPINFO plain;
+			CPINFOEXA ansi;
+			CPINFOEXW wide;
+			UINT page = requested[index] == CP_OEMCP ? GetOEMCP() :
+				requested[index] == CP_ACP || requested[index] == CP_THREAD_ACP ? GetACP() : requested[index];
+			if (!GetCPInfo(requested[index], &plain) || !GetCPInfoExA(requested[index], 0, &ansi) ||
+				!GetCPInfoExW(requested[index], 0, &wide) || ansi.CodePage != page || wide.CodePage != page ||
+				wide.MaxCharSize != plain.MaxCharSize || ansi.MaxCharSize != plain.MaxCharSize ||
+				wide.MaxCharSize != (page == CP_UTF8 ? 4 : 1) || wide.DefaultChar[0] != plain.DefaultChar[0] ||
+				wide.UnicodeDefaultChar != L'?' || !wide.CodePageName[0]) return 160;
+			for (UINT character = 0; character < MAX_PATH; ++character) {
+				if ((BYTE)ansi.CodePageName[character] != wide.CodePageName[character]) return 161;
+				if (!ansi.CodePageName[character]) break;
+				if (character == MAX_PATH - 1) return 162;
+			}
+		}
+		CPINFOEXW sentinel;
+		BYTE *bytes = (BYTE *)&sentinel;
+		for (UINT index = 0; index < sizeof(sentinel); ++index) bytes[index] = 0x5a;
+		if (GetCPInfoExW(0x7fffffff, 0, &sentinel) || GetLastError() != ERROR_INVALID_PARAMETER ||
+			GetCPInfoExW(CP_UTF8, 1, &sentinel) || GetLastError() != ERROR_INVALID_PARAMETER ||
+			GetCPInfoExW(CP_UTF8, 0, NULL) || GetLastError() != ERROR_INVALID_PARAMETER) return 163;
+		for (UINT index = 0; index < sizeof(sentinel); ++index) if (bytes[index] != 0x5a) return 164;
+	}
+	{
+		DWORD needed = 0, repeated = 0, found = 0;
+		if (!K32EnumProcessModules(GetCurrentProcess(), NULL, 0, &needed) || needed < 3 * sizeof(HMODULE)) return 150;
+		HMODULE *modules = HeapAlloc(GetProcessHeap(), 0, needed);
+		if (!modules || !K32EnumProcessModulesEx(GetCurrentProcess(), modules, needed, &repeated, LIST_MODULES_ALL) ||
+			repeated != needed || modules[0] != GetModuleHandleW(NULL)) return 151;
+		for (DWORD index = 0; index < needed / sizeof(HMODULE); ++index) {
+			if (modules[index] == GetModuleHandleW(L"ntdll.dll")) found |= 1;
+			if (modules[index] == GetModuleHandleW(L"kernel32.dll")) {
+				MODULEINFO info;
+				WCHAR name[64];
+				if (!K32GetModuleBaseNameW(GetCurrentProcess(), modules[index], name, 64) ||
+					!K32GetModuleInformation(GetCurrentProcess(), modules[index], &info, sizeof(info)) ||
+					info.lpBaseOfDll != modules[index] || !info.SizeOfImage ||
+					!GetProcAddress(modules[index], "SetThreadErrorMode")) return 152;
+				found |= 2;
+			}
+		}
+		if (found != 3 || !HeapFree(GetProcessHeap(), 0, modules)) return 153;
+	}
+	{
+		char ansi[128];
+		WCHAR wide[128];
+		DWORD mask = GetLogicalDrives(), seen = 0, expected = 0, index, letter;
+		for (letter = 0; letter < 26; ++letter) if (mask & (1u << letter)) expected += 4;
+		if (!(mask & (1u << 2)) || !(mask & (1u << 25)) || GetLogicalDriveStringsA(0, NULL) != expected + 1 ||
+			GetLogicalDriveStringsW(0, NULL) != expected + 1 || expected + 1 > sizeof(ansi)) return 50;
+		for (index = 0; index < sizeof(ansi); ++index) ansi[index] = 0x5a;
+		if (GetLogicalDriveStringsA(expected, ansi) != expected + 1) return 51;
+		for (index = 0; index < sizeof(ansi); ++index) if (ansi[index] != 0x5a) return 52;
+		if (GetLogicalDriveStringsA(expected + 1, ansi) != expected || GetLogicalDriveStringsW(128, wide) != expected ||
+			ansi[expected] || wide[expected] || ansi[expected + 1] != 0x5a) return 53;
+		for (index = 0; index < expected; ++index) if ((BYTE)ansi[index] != wide[index]) return 54;
+		for (index = 0; index < expected; index += 4) {
+			if (ansi[index] < 'A' || ansi[index] > 'Z' || ansi[index + 1] != ':' || ansi[index + 2] != '\\' || ansi[index + 3]) return 55;
+			seen |= 1u << (ansi[index] - 'A');
+		}
+		if (seen != mask) return 56;
+	}
 	WCHAR *folder = NULL, name[64];
 	DWORD size, error;
 	IP_ADAPTER_ADDRESSES *adapters, *adapter;
@@ -133,6 +202,137 @@ int raven_entry(void)
 		return 18;
 	if (!DuplicateTokenEx(token, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &copy) || !copy)
 		return 19;
+	{
+		DWORD privileges[5] = {0xffffffff, 0, 0, 0, 0x12345678};
+		size = 0;
+		if (GetTokenInformation(token, TokenPrivileges, NULL, 0, &size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER || size != sizeof(TOKEN_PRIVILEGES))
+			return 20;
+		if (GetTokenInformation(token, TokenPrivileges, privileges, size - 1, &size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER ||
+			privileges[0] != 0xffffffff)
+			return 21;
+		if (!GetTokenInformation(token, TokenPrivileges, privileges, sizeof(privileges), &size) || size != sizeof(TOKEN_PRIVILEGES) ||
+			privileges[0] != 1 || privileges[1] != 23 || privileges[2] || privileges[3] != (SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT) ||
+			privileges[4] != 0x12345678)
+			return 22;
+		if (GetTokenInformation((HANDLE)(UINT_PTR)0x12345678, TokenPrivileges, privileges, sizeof(privileges), &size) ||
+			GetLastError() != ERROR_INVALID_HANDLE)
+			return 23;
+	}
+	{
+		TOKEN_GROUPS *groups, *logon;
+		DWORD group_size = 0, logon_size = 0, index;
+		int found = 0;
+		if (GetTokenInformation(token, TokenLogonSid, NULL, 0, &logon_size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER ||
+			logon_size < sizeof(TOKEN_GROUPS))
+			return 24;
+		GetTokenInformation(token, TokenGroups, NULL, 0, &group_size);
+		groups = HeapAlloc(GetProcessHeap(), 0, group_size);
+		logon = HeapAlloc(GetProcessHeap(), 0, logon_size);
+		if (!groups || !logon || !GetTokenInformation(token, TokenGroups, groups, group_size, &group_size) ||
+			!GetTokenInformation(token, TokenLogonSid, logon, logon_size, &logon_size) || logon->GroupCount != 1 ||
+			(logon->Groups[0].Attributes & SE_GROUP_LOGON_ID) != SE_GROUP_LOGON_ID || !IsValidSid(logon->Groups[0].Sid))
+			return 25;
+		for (index = 0; index < groups->GroupCount; ++index)
+			if ((groups->Groups[index].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID &&
+				EqualSid(groups->Groups[index].Sid, logon->Groups[0].Sid))
+				++found;
+		if (found != 1)
+			return 26;
+		HeapFree(GetProcessHeap(), 0, groups);
+		HeapFree(GetProcessHeap(), 0, logon);
+	}
+	{
+		ACL acl;
+		TOKEN_DEFAULT_DACL dacl = {&acl};
+		union { ULONGLONG align; BYTE bytes[128]; } buffer;
+		TOKEN_DEFAULT_DACL *queried_dacl = (TOKEN_DEFAULT_DACL *)buffer.bytes;
+		HANDLE changed = NULL;
+		clear(&acl, sizeof(acl));
+		acl.AclRevision = ACL_REVISION;
+		acl.AclSize = sizeof(acl);
+		if (!SetTokenInformation(token, TokenDefaultDacl, &dacl, sizeof(dacl)) ||
+			!DuplicateTokenEx(token, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &changed))
+			return 27;
+		acl.AceCount = 1;
+		if (SetTokenInformation(token, TokenDefaultDacl, &dacl, sizeof(dacl)) || GetLastError() != ERROR_INVALID_ACL)
+			return 28;
+		if (!GetTokenInformation(token, TokenDefaultDacl, &buffer, sizeof(buffer), &size) || size != sizeof(dacl) + sizeof(acl) ||
+			queried_dacl->DefaultDacl != (PACL)(buffer.bytes + sizeof(dacl)) || queried_dacl->DefaultDacl->AceCount != 0)
+			return 29;
+		dacl.DefaultDacl = NULL;
+		if (!SetTokenInformation(token, TokenDefaultDacl, &dacl, sizeof(dacl)) ||
+			!GetTokenInformation(token, TokenDefaultDacl, &buffer, sizeof(buffer), &size) || size != sizeof(dacl) || queried_dacl->DefaultDacl)
+			return 30;
+		if (!GetTokenInformation(changed, TokenDefaultDacl, &buffer, sizeof(buffer), &size) || size != sizeof(dacl) + sizeof(acl) ||
+			!queried_dacl->DefaultDacl || queried_dacl->DefaultDacl->AceCount != 0)
+			return 31;
+		CloseHandle(changed);
+	}
+	{
+		TOKEN_MANDATORY_LABEL label;
+		union { ULONGLONG align; BYTE bytes[64]; } buffer;
+		TOKEN_MANDATORY_LABEL *queried_label = (TOKEN_MANDATORY_LABEL *)buffer.bytes;
+		if (!ConvertStringSidToSidW(L"LW", &label.Label.Sid))
+			return 32;
+		label.Label.Attributes = SE_GROUP_INTEGRITY;
+		if (!SetTokenInformation(token, TokenIntegrityLevel, &label, sizeof(label)) ||
+			!GetTokenInformation(token, TokenIntegrityLevel, &buffer, sizeof(buffer), &size) ||
+			!EqualSid(label.Label.Sid, queried_label->Label.Sid))
+			return 33;
+		if (!GetTokenInformation(copy, TokenIntegrityLevel, &buffer, sizeof(buffer), &size) ||
+			*GetSidSubAuthority(queried_label->Label.Sid, 0) != SECURITY_MANDATORY_MEDIUM_RID)
+			return 34;
+		LocalFree(label.Label.Sid);
+		if (!ConvertStringSidToSidW(L"WD", &label.Label.Sid) ||
+			SetTokenInformation(token, TokenIntegrityLevel, &label, sizeof(label)) || GetLastError() != ERROR_INVALID_SID)
+			return 39;
+		if (!GetTokenInformation(token, TokenIntegrityLevel, &buffer, sizeof(buffer), &size) ||
+			*GetSidSubAuthority(queried_label->Label.Sid, 0) != SECURITY_MANDATORY_LOW_RID)
+			return 40;
+		LocalFree(label.Label.Sid);
+	}
+	{
+		EXPLICIT_ACCESSW entries[3], revoke;
+		PACL original = NULL, reduced = NULL, empty = NULL;
+		PSID world = NULL, users = NULL;
+		ACL_SIZE_INFORMATION acl_size;
+		ACCESS_ALLOWED_ACE *ace = NULL;
+		DWORD index;
+		if (!ConvertStringSidToSidW(L"WD", &world) || !ConvertStringSidToSidW(L"S-1-5-32-545", &users))
+			return 35;
+		clear(entries, sizeof(entries));
+		for (index = 0; index < 3; ++index) {
+			entries[index].grfAccessPermissions = GENERIC_READ;
+			entries[index].grfAccessMode = index == 2 ? DENY_ACCESS : GRANT_ACCESS;
+			BuildTrusteeWithSidW(&entries[index].Trustee, index == 0 ? users : world);
+		}
+		if (SetEntriesInAclW(3, entries, NULL, &original) != ERROR_SUCCESS)
+			return 36;
+		clear(&revoke, sizeof(revoke));
+		revoke.grfAccessMode = REVOKE_ACCESS;
+		BuildTrusteeWithSidW(&revoke.Trustee, world);
+		if (SetEntriesInAclW(1, &revoke, original, &reduced) != ERROR_SUCCESS ||
+			!GetAclInformation(reduced, &acl_size, sizeof(acl_size), AclSizeInformation) || acl_size.AceCount != 1 ||
+			!GetAce(reduced, 0, (void **)&ace) || !EqualSid(&ace->SidStart, users) || original->AceCount != 3)
+			return 37;
+		if (SetEntriesInAclW(1, &revoke, NULL, &empty) != ERROR_SUCCESS || empty->AceCount != 0 || empty->AclSize != sizeof(ACL))
+			return 38;
+		{
+			ACL malformed;
+			PACL result = NULL;
+			clear(&malformed, sizeof(malformed));
+			malformed.AclRevision = ACL_REVISION;
+			malformed.AclSize = sizeof(malformed);
+			malformed.AceCount = 1;
+			if (SetEntriesInAclW(1, &revoke, &malformed, &result) != ERROR_INVALID_ACL || result)
+				return 41;
+		}
+		LocalFree(original);
+		LocalFree(reduced);
+		LocalFree(empty);
+		LocalFree(world);
+		LocalFree(users);
+	}
 	CloseHandle(copy);
 	CloseHandle(token);
 	(void)error;

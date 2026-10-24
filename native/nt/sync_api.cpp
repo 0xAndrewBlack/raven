@@ -37,11 +37,13 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint64_t>(call[0] + spin_count, call[1] & 0x00ffffff);
 	});
 	registry.add("InitializeCriticalSectionEx", 3, [initialize](ApiCall &call) {
-		if (call.u32(2) & ~0x1f000000U) {
+		if ((call.u32(2) & 0xff000000U) & ~0x1f000000U) {
 			call.fail(87);
 			return;
 		}
 		initialize(call);
+		if (call.u32(2) & 0x01000000U)
+			call.store_pointer(call[0], UINT64_MAX);
 		call.store<uint64_t>(call[0] + spin_count, call[1] & 0x00ffffff);
 	});
 	registry.add("DeleteCriticalSection", 1, [](ApiCall &call) {
@@ -92,40 +94,51 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 	const auto acquire_exclusive = [&context, &threads](ApiCall &call) {
 		const uint64_t lock = call[0];
 		const size_t width = call.pointer_width();
-		while (call.load_pointer(lock))
+		while (call.process.compare_exchange(lock, 0, 1, width))
 			threads.block([&context, lock, width] { return context.process.read_memory(lock, width) == std::vector<uint8_t>(width, 0); }, std::nullopt);
-		call.store_pointer(lock, 1);
 	};
 	const auto acquire_shared = [&context, &threads](ApiCall &call) {
 		const uint64_t lock = call[0];
-		while (call.load_pointer(lock) & 1)
-			threads.block([&context, lock] { return !(context.process.read_memory(lock, 1)[0] & 1); }, std::nullopt);
-		call.store_pointer(lock, call.load_pointer(lock) + 2);
+		for (;;) {
+			const auto value = call.load_pointer(lock);
+			if (value & 1)
+				threads.block([&context, lock] { return !(context.process.read_memory(lock, 1)[0] & 1); }, std::nullopt);
+			else if (call.process.compare_exchange(lock, value, value + 2, call.pointer_width()) == value)
+				return;
+		}
+	};
+	const auto release_exclusive = [](ApiCall &call) { call.process.compare_exchange(call[0], 1, 0, call.pointer_width()); };
+	const auto release_shared = [](ApiCall &call) {
+		for (;;) {
+			const auto value = call.load_pointer(call[0]);
+			if (value < 2 || call.process.compare_exchange(call[0], value, value - 2, call.pointer_width()) == value)
+				return;
+		}
 	};
 	registry.add("InitializeSRWLock", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
 	registry.add("AcquireSRWLockExclusive", 1, acquire_exclusive);
 	// The guest component takes a free lock itself and asks here, under the ntdll names, only for one that is held.
 	registry.add("RtlAcquireSRWLockExclusive", 1, acquire_exclusive);
 	registry.add("TryAcquireSRWLockExclusive", 1, [](ApiCall &call) {
-		const bool free = !call.load_pointer(call[0]);
-		if (free)
-			call.store_pointer(call[0], 1);
-		call.ret(free);
+		call.ret(call.process.compare_exchange(call[0], 0, 1, call.pointer_width()) == 0);
 	});
-	registry.add("ReleaseSRWLockExclusive", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
+	registry.add("ReleaseSRWLockExclusive", 1, release_exclusive);
 	registry.add("AcquireSRWLockShared", 1, acquire_shared);
 	registry.add("RtlAcquireSRWLockShared", 1, acquire_shared);
 	registry.add("TryAcquireSRWLockShared", 1, [](ApiCall &call) {
-		const auto value = call.load_pointer(call[0]);
-		if (!(value & 1))
-			call.store_pointer(call[0], value + 2);
-		call.ret(!(value & 1));
+		for (;;) {
+			const auto value = call.load_pointer(call[0]);
+			if (value & 1) {
+				call.ret(0);
+				return;
+			}
+			if (call.process.compare_exchange(call[0], value, value + 2, call.pointer_width()) == value) {
+				call.ret(1);
+				return;
+			}
+		}
 	});
-	registry.add("ReleaseSRWLockShared", 1, [](ApiCall &call) {
-		const auto value = call.load_pointer(call[0]);
-		if (value >= 2)
-			call.store_pointer(call[0], value - 2);
-	});
+	registry.add("ReleaseSRWLockShared", 1, release_shared);
 
 	// Condition variables keep their waiters host-side, keyed by the variable's address. The variable's word holds how many sleep on it,
 	// so a guest can see that a wake has nobody to wake without asking.
@@ -150,11 +163,11 @@ void register_sync_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	};
 	registry.add("InitializeConditionVariable", 1, [](ApiCall &call) { call.store_pointer(call[0], 0); });
-	registry.add("SleepConditionVariableSRW", 4, [sleep_on, acquire_exclusive, acquire_shared](ApiCall &call) {
+	registry.add("SleepConditionVariableSRW", 4, [sleep_on, acquire_exclusive, acquire_shared, release_exclusive, release_shared](ApiCall &call) {
 		const bool shared = call.u32(3) & 1;
 		const uint64_t lock = call[1];
 		auto sub = ApiCall(call.process, call.environment, {lock});
-		sleep_on(call, [&] { if (shared) { const auto v = call.load_pointer(lock); call.store_pointer(lock, v >= 2 ? v - 2 : 0); } else call.store_pointer(lock, 0); },
+		sleep_on(call, [&] { if (shared) release_shared(sub); else release_exclusive(sub); },
 			[&] { if (shared) acquire_shared(sub); else acquire_exclusive(sub); }, call.u32(2));
 	});
 	registry.add("SleepConditionVariableCS", 3, [sleep_on, take, &threads, &context](ApiCall &call) {

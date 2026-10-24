@@ -76,9 +76,42 @@ static DWORD WINAPI mutex_owner(LPVOID parameter)
 	return GetLastError()==ERROR_NOT_OWNER ? 0 : 3;
 }
 
+static int critical_options(void)
+{
+	ULONG_PTR peb;
+#ifdef __x86_64__
+	__asm__ volatile("movq %%gs:0x60,%0" : "=r"(peb));
+	const BYTE *version = (const BYTE *)(peb + 0x118);
+#else
+	__asm__ volatile("movl %%fs:0x30,%0" : "=r"(peb));
+	const BYTE *version = (const BYTE *)(peb + 0xa4);
+#endif
+	if (*(const DWORD *)version != 10 || *(const DWORD *)(version + 4) ||
+		*(const WORD *)(version + 8) != 19045 || *(const WORD *)(version + 10) ||
+		*(const DWORD *)(version + 12) != VER_PLATFORM_WIN32_NT) return 85;
+	CRITICAL_SECTION option;
+	const DWORD flags[] = {1, 0x00ffffff, 0x01000001, 0x10000000};
+	for (unsigned index = 0; index < sizeof(flags) / sizeof(flags[0]); ++index) {
+		for (unsigned at = 0; at < sizeof(option); ++at) ((BYTE *)&option)[at] = 0xa5;
+		if (!InitializeCriticalSectionEx(&option, 0, flags[index])) return 80;
+		if ((flags[index] & 0x01000000) && option.DebugInfo && (ULONG_PTR)option.DebugInfo != (ULONG_PTR)-1) return 81;
+		EnterCriticalSection(&option);
+		if (!TryEnterCriticalSection(&option)) return 82;
+		LeaveCriticalSection(&option);
+		LeaveCriticalSection(&option);
+		DeleteCriticalSection(&option);
+	}
+	for (unsigned at = 0; at < sizeof(option); ++at) ((BYTE *)&option)[at] = 0xa5;
+	if (InitializeCriticalSectionEx(&option, 0, 0x20000001) || GetLastError() != ERROR_INVALID_PARAMETER) return 83;
+	for (unsigned at = 0; at < sizeof(option); ++at) if (((BYTE *)&option)[at] != 0xa5) return 84;
+	return 0;
+}
+
 int raven_entry(void)
 {
-	InitializeCriticalSection(&section);
+	const int options = critical_options();
+	if (options) return options;
+	CHECK(79,InitializeCriticalSectionEx(&section,0,1));
 	HANDLE workers[4];
 	for(int i=0;i<4;++i) {
 		workers[i]=CreateThread(0,0,counting,(LPVOID)(ULONG_PTR)(i+1),0,0);

@@ -87,13 +87,17 @@ BOOL WINAPI RavenInitializeCriticalSectionAndSpinCount(PRTL_CRITICAL_SECTION sec
 
 BOOL WINAPI RavenInitializeCriticalSectionEx(PRTL_CRITICAL_SECTION section, ULONG spin, ULONG flags)
 {
-	/* The flags Windows knows: no debug data, dynamic spin, static initialization, resource type and forced debug data; the
-	   section always gets its debug data here, which callers that force it write their name into. */
+	NTSTATUS status;
+	/* Only the high byte holds RTL flags; the low bits are ignored during initialization. */
+	flags &= RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
 	if (flags & ~0x1f000000U) {
 		LAST_ERROR = ERROR_INVALID_PARAMETER;
 		return FALSE;
 	}
-	return NT_SUCCESS(RtlInitializeCriticalSectionAndSpinCount(section, 0));
+	status = RtlInitializeCriticalSectionEx(section, 0, flags);
+	if (!NT_SUCCESS(status))
+		LAST_ERROR = RtlNtStatusToDosError(status);
+	return NT_SUCCESS(status);
 }
 
 VOID WINAPI RavenDeleteCriticalSection(PRTL_CRITICAL_SECTION section) { RtlDeleteCriticalSection(section); }

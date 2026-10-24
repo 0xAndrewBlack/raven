@@ -173,6 +173,19 @@ int main()
 				check(automatic.all().size() == count, "failed automatic relocation published a module");
 				rejected([&] { automatic.add("requested", relocated, target_base); });
 				check(automatic.all().size() == count, "explicit colliding base changed the module graph");
+				raven::ModuleSet constrained;
+				const auto image_size = raven::PEImage(relocated).image_size;
+				const auto available = [&](uint64_t base, uint64_t size) {
+					check(size == image_size, "placement queried the wrong image size");
+					return base != target_base && (base < fallback || base >= fallback + 2 * 65536);
+				};
+				auto &placed = constrained.add("target", relocated, available);
+				check(placed.loaded.base() == fallback + 2 * 65536 &&
+					read(placed.loaded.data(), 0x1520, width) == placed.loaded.base() + 0x1000,
+					"placement ignored occupied process memory or failed to relocate");
+				auto &data = constrained.add_data("resource", relocated, available);
+				check(data.loaded.base() == fallback + 3 * 65536 && read(data.loaded.data(), 0x1520, width) == target_base + 0x1000,
+					"data placement overlapped a process range or applied code relocations");
 			}
 			rejected([&] { modules.resolve({"facade", "function", 0, false, 0}); });
 			rejected([&] { modules.resolve({"facade", "", 8, true, 0}); });

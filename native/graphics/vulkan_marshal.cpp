@@ -5,6 +5,22 @@
 
 namespace raven {
 
+size_t Marshal::capture_descriptor_size(VkObjectType type) const
+{
+	VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT};
+	VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &descriptor};
+	const auto physical = bridge.devices.at(device_token).physical;
+	vkGetPhysicalDeviceProperties2(bridge.physical.at(physical).handle, &properties);
+	switch (type) {
+	case VK_OBJECT_TYPE_BUFFER: return descriptor.bufferCaptureReplayDescriptorDataSize;
+	case VK_OBJECT_TYPE_IMAGE: return descriptor.imageCaptureReplayDescriptorDataSize;
+	case VK_OBJECT_TYPE_IMAGE_VIEW: return descriptor.imageViewCaptureReplayDescriptorDataSize;
+	case VK_OBJECT_TYPE_SAMPLER: return descriptor.samplerCaptureReplayDescriptorDataSize;
+	case VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR: return descriptor.accelerationStructureCaptureReplayDescriptorDataSize;
+	default: throw std::runtime_error("invalid Vulkan capture descriptor object type");
+	}
+}
+
 void Marshal::context(H type, uint64_t token)
 {
 	switch (type) {
@@ -179,8 +195,10 @@ void Marshal::forget(uint64_t token_value)
 			bridge.surface_source.release(surface->second);
 		bridge.surface_windows.erase(surface);
 		bridge.surface_instances.erase(token_value);
+		bridge.foreign_surfaces.erase(token_value);
 	}
 	bridge.templates.erase(token_value);
+	bridge.foreign_swapchains.erase(token_value);
 	bridge.swapchains.erase(token_value);
 	bridge.generic.erase(token_value);
 	bridge.objects.erase(token_value);

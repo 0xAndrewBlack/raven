@@ -225,6 +225,7 @@ struct DesktopWindow {
 	bool visible = false;
 	bool painting = false, erase_pending = false;
 	DesktopRegion update{};
+	uint64_t update_generation=0;
 	// Since when a top-level window has waited for its controls' paint before the compositor shows it (see NativeWindows::present).
 	std::optional<std::chrono::steady_clock::time_point> present_waiting{};
 	// Whether the window has been shown on the screen once: until then it waits longer for its first paint.

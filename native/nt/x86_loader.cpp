@@ -77,17 +77,7 @@ std::optional<std::vector<uint8_t>> NativeX86Loader::read_library(const std::str
 					return read_all(entry.path());
 				}
 		}
-	// A name alone is looked for beside the program, then in the system directory, then in the current directory.
-	auto resolved = paths.resolve(std::u16string(name.begin(), name.end()));
-	if (name.find_first_of("/\\:") == std::string::npos) {
-		const auto system = paths.resolve(NativePaths::system_directory(false) + u"\\" + std::u16string(name.begin(), name.end()));
-		if (system && system->exists)
-			resolved = system;
-		const auto beside = application_directory.empty() ? std::nullopt :
-			paths.resolve(application_directory + u"\\" + std::u16string(name.begin(), name.end()));
-		if (beside && beside->exists)
-			resolved = beside;
-	}
+	const auto resolved = paths.find_library(application_directory + u"\\program.exe", from_utf8(name), false, library_flags);
 	if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
 		return std::nullopt;
 	identity = lowered(resolved->host.filename().string());
@@ -144,7 +134,7 @@ PEModule *NativeX86Loader::bring(const std::string &requested)
 	}
 	if (modules.all().contains(identity))
 		identity += "#" + std::to_string(modules.all().size());
-	auto &added = modules.add(identity, std::move(*bytes));
+	auto &added = modules.add(identity, std::move(*bytes), [&](uint64_t base, uint64_t size) { return process.memory_available(base, size); });
 	added.file = file;
 	staged.push_back(&added);
 	if (mapping_only && staged.size() == 1) {
@@ -187,7 +177,7 @@ std::optional<std::string> NativeX86Loader::path_key(const std::string &name) co
 	if (name.find_first_of("/\\:") != std::string::npos)
 		resolved = paths.resolve(std::u16string(name.begin(), name.end()));
 	else if (!application_directory.empty())
-		resolved = paths.resolve(application_directory + u"\\" + std::u16string(name.begin(), name.end()));
+		resolved = paths.find_library(application_directory + u"\\program.exe", from_utf8(name), false, library_flags);
 	if (!resolved || !resolved->exists || !std::filesystem::is_regular_file(resolved->host))
 		return std::nullopt;
 	return lowered(resolved->host.string());
@@ -219,10 +209,13 @@ bool NativeX86Loader::release(uint64_t handle)
 	return true;
 }
 
-uint64_t NativeX86Loader::load(std::string name, bool only_map)
+uint64_t NativeX86Loader::load(std::string name, bool only_map, uint32_t search_flags)
 {
 	if (!call)
 		return 0;
+	const auto previous_flags = library_flags;
+	library_flags = search_flags;
+	struct RestoreFlags { uint32_t &value; uint32_t previous; ~RestoreFlags() { value = previous; } } restore{library_flags, previous_flags};
 	const auto key = path_key(name);
 	if (key)
 		if (const auto found = held.find(*key); found != held.end()) {

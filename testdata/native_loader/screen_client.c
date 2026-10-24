@@ -1,8 +1,31 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-/* The screen context GetDC(NULL) hands out, whether the runtime or the program answers it. A context the runtime makes is always a new
-   one, so taking and releasing twice in a row and getting the same handle back shows the program answered both. */
+/* Screen contexts are reused while clean, but a leased context belongs to one caller. */
+
+static HDC held[4];
+static volatile LONG ready;
+
+static DWORD WINAPI screen_worker(void *argument)
+{
+	const unsigned index = (unsigned)(UINT_PTR)argument;
+	HFONT font = CreateFontW(-30, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, L"Arial");
+	held[index] = GetDC(NULL);
+	InterlockedIncrement(&ready);
+	while (InterlockedCompareExchange(&ready, 4, 4) != 4)
+		Sleep(0);
+	DWORD error = !held[index] || !font;
+	for (unsigned other = 0; other < 4; ++other)
+		if (other != index && held[index] == held[other])
+			error = 1;
+	if (!error && (!SelectObject(held[index], font) || GetCurrentObject(held[index], OBJ_FONT) != font))
+		error = 2;
+	if (held[index] && ReleaseDC(NULL, held[index]) != 1)
+		error = 3;
+	if (font)
+		DeleteObject(font);
+	return error;
+}
 
 static int screen_caps_hold(HDC dc)
 {
@@ -41,5 +64,22 @@ int raven_entry(void)
 	HDC memory = CreateCompatibleDC(NULL);
 	if (!memory || GetDeviceCaps(memory, TECHNOLOGY) == DT_RASDISPLAY || !DeleteDC(memory))
 		return 7;
+	for (unsigned round = 0; round < 16; ++round) {
+		HANDLE workers[4];
+		ready = 0;
+		for (unsigned index = 0; index < 4; ++index) {
+			workers[index] = CreateThread(NULL, 0, screen_worker, (void *)(UINT_PTR)index, 0, NULL);
+			if (!workers[index])
+				return 8;
+		}
+		if (WaitForMultipleObjects(4, workers, TRUE, 5000) != WAIT_OBJECT_0)
+			return 9;
+		for (unsigned index = 0; index < 4; ++index) {
+			DWORD code = 0;
+			if (!GetExitCodeThread(workers[index], &code) || code)
+				return 10;
+			CloseHandle(workers[index]);
+		}
+	}
 	return 0;
 }

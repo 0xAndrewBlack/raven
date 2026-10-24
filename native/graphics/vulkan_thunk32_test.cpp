@@ -28,6 +28,7 @@ int main()
 					fail(structure, at, "scalar of different sizes " + std::to_string(field.size32) + "/" + std::to_string(field.size64));
 				break;
 			case Field::raw_union:
+			case Field::descriptor_data:
 				if (field.size32 != field.size64)
 					fail(structure, at, "union of different sizes " + std::to_string(field.size32) + "/" + std::to_string(field.size64));
 				break;

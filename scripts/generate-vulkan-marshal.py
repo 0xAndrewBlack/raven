@@ -25,7 +25,7 @@ VK_EXT_multi_draw VK_EXT_pageable_device_local_memory VK_EXT_memory_budget VK_KH
 VK_EXT_attachment_feedback_loop_dynamic_state VK_EXT_border_color_swizzle VK_EXT_fragment_shader_interlock VK_EXT_sample_locations
 VK_KHR_external_memory VK_KHR_external_semaphore VK_KHR_timeline_semaphore VK_KHR_synchronization2 VK_KHR_dynamic_rendering
 VK_KHR_deferred_host_operations VK_KHR_acceleration_structure VK_KHR_ray_tracing_pipeline VK_KHR_ray_query VK_KHR_ray_tracing_maintenance1
-VK_KHR_ray_tracing_position_fetch""".split()
+VK_KHR_ray_tracing_position_fetch VK_EXT_descriptor_buffer""".split()
 
 # Parameters and members of these types cannot cross the guest/host boundary by copying.
 FOREIGN = re.compile(r"^(HANDLE|LPCWSTR|DWORD|SECURITY_ATTRIBUTES|HINSTANCE|HWND|HMONITOR|wl_\w+|xcb_\w+|Display|Window|VisualID|RROutput|"
@@ -39,8 +39,8 @@ FullScreen ImagePipe Sci Cuda Cu Tensor Tensors DataGraph Micromap Micromaps
 Opacity Optical Flow Video Decode Encode Mesh Tile Tiles Latency Reflex
 Keyed Mutex Zircon Hdr Refresh Cycle Past Fault Faults Proc Addr Binary Binaries Slot Window""".split())
 # Words that only matter inside these exact phrases.
-SKIP_PHRASES = ("DescriptorBuffer", "ResourceHeap", "SamplerHeap", "PushData", "OpaqueCapture", "DescriptorSize", "DescriptorSetLayoutSize",
-                "DescriptorSetLayoutBindingOffset", "DescriptorEXT", "DeviceMask", "DeviceGroup", "ShaderObject", "ShadersEXT", "ShaderBinary",
+SKIP_PHRASES = ("ResourceHeap", "SamplerHeap", "PushData", "DescriptorSize",
+                "DeviceMask", "DeviceGroup", "ShaderObject", "ShadersEXT", "ShaderBinary",
                 "PipelineBinar", "PipelineExecutable", "PipelineProperties", "PipelineStatistics", "FrameBoundary", "Memory(Win32|Fd|Zircon|Host|Remote)",
                 "SemaphoreFd", "FenceFd", "ExecutionSet", "IndirectExecutionSet", "ExecutionGraph", "PrivateData")
 # Commands the bridge implements by hand around its own bookkeeping.
@@ -164,6 +164,10 @@ class Registry:
 
 SCALAR_64 = {"uint64_t", "int64_t", "VkDeviceSize", "VkDeviceAddress", "size_t", "VkFlags64", "VkRemoteAddressNV"}
 
+CAPTURE_OBJECTS = {"Buffer": "BUFFER", "Image": "IMAGE", "ImageView": "IMAGE_VIEW", "Sampler": "SAMPLER",
+                   "AccelerationStructure": "ACCELERATION_STRUCTURE_KHR"}
+CAPTURE_COMMANDS = {f"vkGet{name}OpaqueCaptureDescriptorDataEXT": value for name, value in CAPTURE_OBJECTS.items()}
+
 
 def main():
     registry = Registry(sys.argv[1])
@@ -192,6 +196,8 @@ def main():
             if base in registry.handles:
                 return "handle"
             if base in registry.unions:
+                if base == "VkDescriptorDataEXT":
+                    return "descriptor_data"
                 return "union" if union_plain(base) else None
             if base in registry.structs:
                 return "struct" if struct_ok(base) else None
@@ -202,6 +208,10 @@ def main():
             if base == "char":
                 return "string"
             if base == "void":
+                if struct_name == "VkOpaqueCaptureDescriptorDataCreateInfoEXT":
+                    return "capture_data"
+                if struct_name in CAPTURE_COMMANDS:
+                    return "bytes"
                 if member.name == "pShaderGroupCaptureReplayHandle":
                     return "null_only"
                 return "bytes" if member.len else None
@@ -346,6 +356,9 @@ def emit(registry, selected, state, output, classify_member, declared):
 
     for root in ("VkMemoryAllocateInfo",):
         want(root)
+    if "vkGetDescriptorEXT" in selected:
+        want("VkDescriptorAddressInfoEXT")
+        want("VkDescriptorImageInfo")
     for exported, target in selected.items():
         for param in registry.commands[target]["params"]:
             want(param.type)
@@ -371,7 +384,7 @@ def emit(registry, selected, state, output, classify_member, declared):
             needs_fix[name] = False
             for member in registry.structs[name]["members"]:
                 kind = kinds_of[name][member.name]
-                if kind in ("pnext", "handle", "string", "bytes", "handle_array", "struct_pointer", "struct_pointer_array", "string_array", "scalar_pointer", "null_only") or \
+                if kind in ("pnext", "handle", "string", "bytes", "handle_array", "struct_pointer", "struct_pointer_array", "string_array", "scalar_pointer", "null_only", "descriptor_data", "capture_data") or \
                         (kind == "struct" and fix_needed(registry.resolve_struct(member.type))):
                     needs_fix[name] = True
         return needs_fix[name]
@@ -380,7 +393,7 @@ def emit(registry, selected, state, output, classify_member, declared):
         name = registry.resolve_struct(name)
         for member in registry.structs[name]["members"]:
             kind = kinds_of[name][member.name]
-            if kind in ("string", "bytes", "handle_array", "struct_pointer", "struct_pointer_array", "string_array", "scalar_pointer"):
+            if kind in ("string", "bytes", "handle_array", "struct_pointer", "struct_pointer_array", "string_array", "scalar_pointer", "descriptor_data", "capture_data"):
                 return False
             if kind == "struct" and not encodable(member.type):
                 return False
@@ -413,6 +426,22 @@ def emit(registry, selected, state, output, classify_member, declared):
             length = member_len(member, member_names)
             if kind == "pnext":
                 body.append(f"p->pNext = decode_pnext(m, reinterpret_cast<uint64_t>(p->pNext));")
+            elif kind == "capture_data":
+                body.append(f"p->{n} = p->{n} ? m.copy_bytes(reinterpret_cast<uint64_t>(p->{n}), m.capture_descriptor_size(m.capture_object)) : nullptr;")
+            elif kind == "descriptor_data":
+                body.extend([
+                    "switch (p->type) {",
+                    "case VK_DESCRIPTOR_TYPE_SAMPLER:",
+                    "    p->data.pSampler = m.host_array<VkSampler>(H::VkSampler, reinterpret_cast<uint64_t>(p->data.pSampler), 1); break;",
+                    "case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:",
+                    "case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:",
+                    "    p->data.pSampledImage = p->data.pSampledImage ? m.descriptor_image_infos(reinterpret_cast<uint64_t>(p->data.pSampledImage), 1, p->type) : nullptr; break;",
+                    "case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:",
+                    "case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:",
+                    "    p->data.pUniformBuffer = p->data.pUniformBuffer ? decode_array_VkDescriptorAddressInfoEXT(m, reinterpret_cast<uint64_t>(p->data.pUniformBuffer), 1) : nullptr; break;",
+                    "case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_NV: break;",
+                    "default: throw std::runtime_error(\"unsupported Vulkan descriptor data type\");",
+                    "}"])
             elif kind == "handle":
                 body.append(f"p->{n} = reinterpret_cast<{member.type}>(m.host(H::{base}, reinterpret_cast<uint64_t>(p->{n})));")
             elif kind == "struct" and fix_needed(base):
@@ -516,6 +545,9 @@ def emit(registry, selected, state, output, classify_member, declared):
         first_base = registry.resolve_struct(first.type)
         level = "device" if first_base in ("VkDevice", "VkQueue", "VkCommandBuffer") else "instance"
         lines.append(f"\tm.context(H::{first_base}, a[0]);")
+        for object_name, object_type in CAPTURE_OBJECTS.items():
+            if target == f"vkCreate{object_name}" or target == f"vkCreate{object_name}KHR":
+                lines.append(f"\tm.capture_object = VK_OBJECT_TYPE_{object_type};")
         # scalars first
         index_of = {param.name: i for i, param in enumerate(params)}
         decl = []
@@ -557,6 +589,8 @@ def emit(registry, selected, state, output, classify_member, declared):
             n = param.name
             v = f"v_{n}"
             length = None
+            if target in CAPTURE_COMMANDS and n == "pData":
+                length = f"m.capture_descriptor_size(VK_OBJECT_TYPE_{CAPTURE_COMMANDS[target]})"
             if param.len and param.len[0] != "null-terminated":
                 length = cxx_len(param.len[0], {k: val for k, val in names_map.items() if val})
                 if length is None and "->" in param.len[0]:

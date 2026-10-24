@@ -15,6 +15,7 @@ enum class Field : uint8_t {
 	widen_pointer,            // an address the bridge reads from guest memory as it is: zero-extended, never read back
 	nested,                   // a structure inside the structure (or an array of them)
 	raw_union,                // a union copied as far as both layouts reach
+	descriptor_data,          // a descriptor's tagged pointer or device address
 	pnext,                    // a chain of structures
 	pointer_struct,           // to one or more structures
 	pointer_struct_pointers,  // to an array of pointers to structures

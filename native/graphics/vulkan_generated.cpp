@@ -1,12 +1,11 @@
 // Commands marshaled from the Vulkan registry; see scripts/generate-vulkan-marshal.py.
 #include "vulkan_marshal.h"
+#include "desktop/foreign_surface.h"
 #include <vulkan/vulkan_wayland.h>
 
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
-#include <sys/mman.h>
-#include <unistd.h>
 
 namespace raven {
 
@@ -15,6 +14,13 @@ namespace raven {
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #include "vulkan_marshal_generated.inc"
+
+static const GeneratedCommand *generated_command(std::string_view name)
+{
+	const auto found = std::lower_bound(std::begin(generated_commands), std::end(generated_commands), name,
+		[](const auto &command, std::string_view wanted) { return std::string_view(command.name) < wanted; });
+	return found != std::end(generated_commands) && name == found->name ? found : nullptr;
+}
 
 uint64_t Marshal::allocate_memory(const std::vector<uint64_t> &a)
 {
@@ -26,59 +32,19 @@ uint64_t Marshal::allocate_memory(const std::vector<uint64_t> &a)
 	check_writable(a[3], 8);
 	VkDeviceMemory memory = VK_NULL_HANDLE;
 	VulkanBridge::Memory record{VK_NULL_HANDLE, a[0], info->allocationSize};
-	// A plain host-visible allocation on a device that imports host memory comes from a memfd the guest will map as it is.
-	const auto &device = bridge.devices.at(a[0]);
-	// Allocation flags and priorities travel along with an import; any other structure (a dedicated allocation, an export) keeps the copy.
-	bool importable = device.host_import && info->memoryTypeIndex < 32 && (device.host_visible_types >> info->memoryTypeIndex & 1);
-	for (auto *next = static_cast<const VkBaseInStructure *>(info->pNext); next && importable; next = next->pNext)
-		importable = next->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO || next->sType == VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT;
-	if (importable) {
-		const size_t size = size_t((info->allocationSize + device.import_alignment - 1) / device.import_alignment * device.import_alignment);
-		const int file = memfd_create("raven-vulkan-memory", MFD_CLOEXEC);
-		void *host = MAP_FAILED;
-		if (file >= 0 && ftruncate(file, off_t(size)) == 0) {
-			// The mapping starts at the alignment the driver asks for: a reservation large enough to hold an aligned window of the file.
-			void *reserve = mmap(nullptr, size + device.import_alignment, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-			if (reserve != MAP_FAILED) {
-				const auto start = (reinterpret_cast<uintptr_t>(reserve) + device.import_alignment - 1) / device.import_alignment * device.import_alignment;
-				host = mmap(reinterpret_cast<void *>(start), size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, file, 0);
-				if (start > reinterpret_cast<uintptr_t>(reserve))
-					munmap(reserve, start - reinterpret_cast<uintptr_t>(reserve));
-				const auto end = reinterpret_cast<uintptr_t>(reserve) + size + device.import_alignment;
-				if (end > start + size)
-					munmap(reinterpret_cast<void *>(start + size), end - (start + size));
-			}
-		}
-		VkMemoryHostPointerPropertiesEXT pointer{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-		if (host != MAP_FAILED && device.host_pointer_properties(host_device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host, &pointer) == VK_SUCCESS &&
-			(pointer.memoryTypeBits >> info->memoryTypeIndex & 1)) {
-			VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, info->pNext,
-				VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host};
-			VkMemoryAllocateInfo imported = *info;
-			imported.pNext = &import;
-			imported.allocationSize = size;
-			if (vkAllocateMemory(host_device, &imported, nullptr, &memory) == VK_SUCCESS) {
-				record.import_file = file;
-				record.import_host = static_cast<uint8_t *>(host);
-				record.import_size = size;
-			}
-		}
-		if (!record.import_host) {
-			memory = VK_NULL_HANDLE;
-			if (host != MAP_FAILED)
-				munmap(host, size);
-			if (file >= 0)
-				close(file);
-		}
-	}
-	const auto status = memory ? VK_SUCCESS : vkAllocateMemory(host_device, info, nullptr, &memory);
+	VkPhysicalDeviceMemoryProperties properties{};
+	const auto physical = bridge.devices.at(a[0]).physical;
+	vkGetPhysicalDeviceMemoryProperties(bridge.physical.at(physical).handle, &properties);
+	if (info->memoryTypeIndex >= properties.memoryTypeCount)
+		throw std::runtime_error("invalid Vulkan memory type index");
+	record.coherent = (properties.memoryTypes[info->memoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+	// Importing host memory would require matching external-memory flags on every bound resource.
+	const auto status = vkAllocateMemory(host_device, info, nullptr, &memory);
 	if (status == VK_SUCCESS) {
 		const auto token_value = bridge.next_handle++;
 		record.handle = memory;
 		bridge.memories.emplace(token_value, record);
 		store<uint64_t>(a[3], token_value);
-	} else {
-		VulkanBridge::release_import(record);
 	}
 	return static_cast<uint32_t>(status);
 }
@@ -138,20 +104,29 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		const auto window = load<uint64_t>(a[1] + 32);
 		uint32_t status = static_cast<uint32_t>(VK_ERROR_INITIALIZATION_FAILED);
 		const auto host = surface_source.create ? surface_source.create(window) : std::nullopt;
+		VkSurfaceKHR surface = VK_NULL_HANDLE;
+		bool foreign=false;
 		if (host) {
 			VkWaylandSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR, nullptr, 0,
 				static_cast<struct wl_display *>(host->first), static_cast<struct wl_surface *>(host->second)};
-			VkSurfaceKHR surface = VK_NULL_HANDLE;
 			const auto created = marshal.proc<PFN_vkCreateWaylandSurfaceKHR>("vkCreateWaylandSurfaceKHR")(marshal.host_instance, &info, nullptr, &surface);
 			status = static_cast<uint32_t>(created);
-			if (created == VK_SUCCESS) {
-				const auto token = marshal.new_token(H::VkSurfaceKHR, reinterpret_cast<uint64_t>(surface));
-				surface_windows.emplace(token, window);
-				surface_instances.emplace(token, a[0]);
-				store<uint64_t>(a[3], token);
-			} else if (surface_source.release) {
+			if (created != VK_SUCCESS && surface_source.release) {
 				surface_source.release(window);
 			}
+		} else if (foreign_window_size(window)) {
+			const auto create=reinterpret_cast<PFN_vkCreateHeadlessSurfaceEXT>(vkGetInstanceProcAddr(marshal.host_instance,"vkCreateHeadlessSurfaceEXT"));
+			if (create) {
+				VkHeadlessSurfaceCreateInfoEXT info{VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT};
+				status=static_cast<uint32_t>(create(marshal.host_instance,&info,nullptr,&surface));
+				foreign=status==VK_SUCCESS;
+			}
+		}
+		if (status==VK_SUCCESS) {
+			const auto token=marshal.new_token(H::VkSurfaceKHR,reinterpret_cast<uint64_t>(surface));
+			surface_windows.emplace(token,window); surface_instances.emplace(token,a[0]);
+			if (foreign) foreign_surfaces.insert(token);
+			store<uint64_t>(a[3],token);
 		}
 		process.return_api(status);
 		return true;
@@ -180,9 +155,10 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 		Marshal marshal(*this, process);
 		const auto window_size = [&](uint64_t surface) -> std::optional<std::pair<uint32_t, uint32_t>> {
 			const auto window = surface_windows.find(surface);
-			if (window == surface_windows.end() || !surface_source.size)
+			if (window == surface_windows.end())
 				return std::nullopt;
-			return surface_source.size(window->second);
+			if (foreign_surfaces.contains(surface)) return foreign_window_size(window->second);
+			return surface_source.size ? surface_source.size(window->second) : std::nullopt;
 		};
 		uint64_t result = 0;
 		if (name == "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") {
@@ -196,25 +172,60 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 					}
 				}
 		} else if (name == "vkCreateSwapchainKHR") {
-			result = cmd_vkCreateSwapchainKHR(*this, marshal, arguments, floating);
+			const auto surface=load<uint64_t>(arguments[1]+24);
+			if (foreign_surfaces.contains(surface)) {
+				marshal.context(H::VkDevice,arguments[0]);
+				marshal.require_null(arguments[2]); marshal.check_writable(arguments[3],8);
+				auto *info=decode_array_VkSwapchainCreateInfoKHR(marshal,arguments[1],1);
+				info->imageUsage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+				VkSwapchainKHR swapchain=VK_NULL_HANDLE;
+				auto status=vkCreateSwapchainKHR(marshal.host_device,info,nullptr,&swapchain);
+				if (status==VK_SUCCESS) {
+					const auto token=marshal.new_token(H::VkSwapchainKHR,reinterpret_cast<uint64_t>(swapchain));
+					status=prepare_foreign_swapchain(token,arguments[0],swapchain,*info,surface_windows.at(surface));
+					if (status==VK_SUCCESS) store<uint64_t>(arguments[3],token);
+					else { vkDestroySwapchainKHR(marshal.host_device,swapchain,nullptr); marshal.forget(token); }
+				}
+				result=static_cast<uint32_t>(status);
+			} else result = cmd_vkCreateSwapchainKHR(*this, marshal, arguments, floating);
 			if (static_cast<int32_t>(result) == VK_SUCCESS) {
 				// VkSwapchainCreateInfoKHR: surface at 24 and imageExtent at 44.
 				const auto token = load<uint64_t>(arguments[3]);
 				swapchains[token] = {load<uint64_t>(arguments[1] + 24), load<uint32_t>(arguments[1] + 44), load<uint32_t>(arguments[1] + 48)};
 			}
 		} else if (name == "vkAcquireNextImageKHR") {
-			result = swapchain_stale(arguments[1]) ? static_cast<uint32_t>(VK_ERROR_OUT_OF_DATE_KHR)
+			const auto swap=swapchains.find(arguments[1]);
+			const bool lost=swap!=swapchains.end() && foreign_surfaces.contains(swap->second.surface) && !window_size(swap->second.surface);
+			result = lost ? static_cast<uint32_t>(VK_ERROR_SURFACE_LOST_KHR) : swapchain_stale(arguments[1]) ? static_cast<uint32_t>(VK_ERROR_OUT_OF_DATE_KHR)
 				: cmd_vkAcquireNextImageKHR(*this, marshal, arguments, floating);
 		} else {
-			result = cmd_vkQueuePresentKHR(*this, marshal, arguments, floating);
+			marshal.context(H::VkQueue,arguments[0]);
+			if (load<uint32_t>(arguments[1]+32)>4096 || load<uint32_t>(arguments[1]+16)>4096)
+				throw std::runtime_error("Vulkan present array count exceeds limit");
+			auto *info=decode_array_VkPresentInfoKHR(marshal,arguments[1],1);
+			const auto results=load<uint64_t>(arguments[1]+56);
+			if (results) marshal.check_writable(results,size_t(info->swapchainCount)*4);
+			const auto foreign=present_foreign(arguments[0],*info);
+			const auto host_queue=queues.at(arguments[0]).handle;
+			result=static_cast<uint32_t>(foreign ? *foreign : detached([&] {
+				return vkQueuePresentKHR(host_queue,info);
+			}));
 			if (static_cast<int32_t>(result) == VK_SUCCESS) {
 				// VkPresentInfoKHR: swapchainCount at 32 and pSwapchains at 40.
 				const auto count = load<uint32_t>(arguments[1] + 32);
 				const auto list = load<uint64_t>(arguments[1] + 40);
-				for (uint32_t index = 0; index < count; ++index)
-					if (swapchain_stale(load<uint64_t>(list + uint64_t(index) * 8)))
-						result = static_cast<uint32_t>(VK_SUBOPTIMAL_KHR);
+				for (uint32_t index = 0; index < count; ++index) {
+					const auto token=load<uint64_t>(list+uint64_t(index)*8);
+					const auto swap=swapchains.find(token);
+					const bool lost=swap!=swapchains.end() && foreign_surfaces.contains(swap->second.surface) && !window_size(swap->second.surface);
+					if (lost || swapchain_stale(token)) {
+						const auto status=lost ? VK_ERROR_SURFACE_LOST_KHR : VK_SUBOPTIMAL_KHR;
+						result=static_cast<uint32_t>(status);
+						if (info->pResults) info->pResults[index]=status;
+					}
+				}
 			}
+			if (results) marshal.write(results,info->pResults,size_t(info->swapchainCount)*4);
 		}
 		process.return_api(result);
 		return true;
@@ -277,12 +288,13 @@ bool VulkanBridge::dispatch_hand(std::string_view name)
 bool VulkanBridge::swapchain_stale(uint64_t swapchain) const
 {
 	const auto found = swapchains.find(swapchain);
-	if (found == swapchains.end() || !surface_source.size)
+	if (found == swapchains.end())
 		return false;
 	const auto window = surface_windows.find(found->second.surface);
 	if (window == surface_windows.end())
 		return false;
-	const auto size = surface_source.size(window->second);
+	const auto size = foreign_surfaces.contains(found->second.surface) ? foreign_window_size(window->second) :
+		surface_source.size ? surface_source.size(window->second) : std::nullopt;
 	return size && (size->first != found->second.width || size->second != found->second.height);
 }
 
@@ -295,10 +307,8 @@ bool vulkan_generated_is_device(std::string_view name)
 {
 	if (name == "vkAllocateMemory" || name == "vkUpdateDescriptorSetWithTemplate" || name == "vkUpdateDescriptorSetWithTemplateKHR")
 		return true;
-	for (const auto &command : generated_commands)
-		if (name == command.name)
-			return command.device;
-	return false;
+	const auto *command = generated_command(name);
+	return command && command->device;
 }
 
 bool VulkanBridge::dispatch_generated(std::string_view name)
@@ -309,17 +319,15 @@ bool VulkanBridge::dispatch_generated(std::string_view name)
 		process.return_api(marshal.allocate_memory(arguments));
 		return true;
 	}
-	for (const auto &command : generated_commands) {
-		if (name != command.name)
-			continue;
-		const auto arguments = process.api_arguments(command.arguments);
-		std::array<uint64_t, 4> floating{};
-		try { floating = process.api_float_arguments(); } catch (const std::runtime_error &) {}
-		Marshal marshal(*this, process);
-		process.return_api(command.function(*this, marshal, arguments, floating));
-		return true;
-	}
-	return false;
+	const auto *command = generated_command(name);
+	if (!command)
+		return false;
+	const auto arguments = process.api_arguments(command->arguments);
+	std::array<uint64_t, 4> floating{};
+	try { floating = process.api_float_arguments(); } catch (const std::runtime_error &) {}
+	Marshal marshal(*this, process);
+	process.return_api(command->function(*this, marshal, arguments, floating));
+	return true;
 }
 
 }

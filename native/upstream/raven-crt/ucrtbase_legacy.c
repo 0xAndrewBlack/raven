@@ -755,6 +755,25 @@ CRT char *_tempnam(const char *folder, const char *prefix)
 	return NULL;
 }
 
+CRT char *_mktemp(char *name)
+{
+	const size_t length = name ? strlen(name) : 0;
+	if (length < 6 || memcmp(name + length - 6, "XXXXXX", 6)) {
+		*_errno() = 22;
+		return NULL;
+	}
+	char *suffix = name + length - 6;
+	sprintf(suffix + 1, "%05lu", (unsigned long)(GetCurrentThreadId() % 100000));
+	for (char letter = 'a'; letter <= 'z'; ++letter) {
+		suffix[0] = letter;
+		if (GetFileAttributesA(name) == INVALID_FILE_ATTRIBUTES)
+			return name;
+	}
+	name[0] = 0;
+	*_errno() = 17;
+	return NULL;
+}
+
 /* A descriptor is a terminal when the handle behind it is a character device. */
 CRT int _isatty(int fd)
 {

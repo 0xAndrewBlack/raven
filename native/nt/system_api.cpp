@@ -459,9 +459,9 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("SetProcessShutdownParameters", 2, [](ApiCall &call) { call.ret(1); });
 	// Processor topology: one package, one core per logical processor, no cache or NUMA records beyond the single node.
 	registry.add("GetLogicalProcessorInformationEx", 3, [processor_mask](ApiCall &call) {
-		constexpr uint32_t core = 0, node = 1, package = 3, all = 0xffff;
+		constexpr uint32_t core = 0, node = 1, package = 3, group = 4, all = 0xffff;
 		const uint32_t relationship = call.u32(0);
-		if (relationship != core && relationship != node && relationship != package && relationship != all) {
+		if (relationship != core && relationship != node && relationship != package && relationship != group && relationship != all) {
 			call.fail(87);
 			return;
 		}
@@ -492,6 +492,18 @@ void register_system_api(ApiRegistry &registry, KernelContext &context)
 			add(node, mask);
 		if (relationship == package || relationship == all)
 			add(package, mask);
+		if (relationship == group || relationship == all) {
+			std::vector<uint8_t> entry(72 + width);
+			const uint32_t size = uint32_t(entry.size());
+			std::memcpy(entry.data(), &group, 4);
+			std::memcpy(entry.data() + 4, &size, 4);
+			const uint16_t groups = 1;
+			std::memcpy(entry.data() + 8, &groups, 2);
+			std::memcpy(entry.data() + 10, &groups, 2);
+			entry[32] = entry[33] = uint8_t(std::min<long>(count, 64));
+			std::memcpy(entry.data() + 72, &mask, width);
+			bytes.insert(bytes.end(), entry.begin(), entry.end());
+		}
 		const uint32_t capacity = call[1] ? call.load<uint32_t>(call[2]) : 0;
 		call.store<uint32_t>(call[2], uint32_t(bytes.size()));
 		if (!call[1] || capacity < bytes.size()) {

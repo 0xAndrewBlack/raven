@@ -875,6 +875,19 @@ CRT int _get_errno(int *value)
 
 CRT int _set_errno(int value) { *_errno() = value; return 0; }
 
+CRT int _get_doserrno(unsigned long *value)
+{
+	if (!value) {
+		_invalid_parameter_noinfo();
+		*_errno() = 22;
+		return 22;
+	}
+	*value = *__doserrno();
+	return 0;
+}
+
+CRT int _set_doserrno(unsigned long value) { *__doserrno() = value; return 0; }
+
 CRT int strerror_s(char *buffer, size_t size, int code)
 {
 	if (!buffer || !size)

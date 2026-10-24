@@ -25,6 +25,8 @@ public:
 	uint64_t device_token = 0;
 	VkDevice host_device = VK_NULL_HANDLE;
 	VkInstance host_instance = VK_NULL_HANDLE;
+	VkObjectType capture_object = VK_OBJECT_TYPE_UNKNOWN;
+	size_t capture_descriptor_size(VkObjectType type) const;
 
 	// Records the device or instance the first handle argument belongs to; function lookup and ownership follow from it.
 	void context(H type, uint64_t token);

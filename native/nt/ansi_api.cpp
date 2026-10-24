@@ -32,6 +32,7 @@ struct Adapter {
 const Adapter adapters[] = {
 	{"CreateFileA", {0}},
 	{"GetFileAttributesA", {0}},
+	{"SetupDiGetClassDevsA", {1}},
 	{"SetFileAttributesA", {0}},
 	{"DeleteFileA", {0}},
 	{"MoveFileA", {0, 1}},
@@ -61,6 +62,7 @@ const Adapter adapters[] = {
 	{"CryptAcquireContextA", {1, 2}},
 	{"CreateMutexA", {2}},
 	{"CreateEventA", {3}},
+	{"CreateEventExA", {1}},
 	{"CreateProcessA", {0, 1, 7}},
 	{"CreateNamedPipeA", {0}},
 	{"WaitNamedPipeA", {0}},

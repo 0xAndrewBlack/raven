@@ -1,6 +1,7 @@
 #pragma once
 
 #include "api.h"
+#include "access_token.h"
 #include "guest_allocator.h"
 #include "memory.h"
 #include "objects.h"
@@ -42,13 +43,13 @@ struct KernelContext {
 	std::function<NativeResult(uint64_t, std::span<const uint64_t>)> call;
 	// Top-level exception filter installed by the program (SetUnhandledExceptionFilter).
 	uint64_t unhandled_filter = 0;
+	bool shutdown_in_progress = false;
 	// Delivers a CPU fault to the guest's handlers; never returns normally (it redirects or ends the process).
 	std::function<void(const NativeResult &)> raise_fault;
 	// Walks the guest stack with the unwind tables and names each caller as module+offset (diagnostics only).
 	std::function<std::string()> describe_stack;
-	// True when the window system has input, paint or timer work for the calling thread (MsgWaitForMultipleObjects).
-	// Whether a message, paint request, sent message or timer waits for the guest thread with this id.
-	std::function<bool(uint32_t)> message_ready;
+	// Current and new queue categories for a thread; the last argument clears the requested new bits.
+	std::function<uint32_t(uint32_t,uint32_t,bool)> queue_status;
 	// Takes a reference on the loaded module at this base, or pins it for the life of the process (GetModuleHandleEx).
 	std::function<void(uint64_t, bool)> reference_module;
 	// The environment variables the program has now, as the block a new process receives (set by the system handlers).
@@ -57,6 +58,7 @@ struct KernelContext {
 	std::shared_ptr<Reactor> reactor = std::make_shared<Reactor>();
 	// Named pipes served by this process and the pipe operations that have not finished.
 	std::shared_ptr<PipeState> pipes = std::make_shared<PipeState>();
+	std::shared_ptr<AccessToken> process_token = std::make_shared<AccessToken>();
 };
 
 // Windows FILETIME ticks are 100 ns units since 1601-01-01.

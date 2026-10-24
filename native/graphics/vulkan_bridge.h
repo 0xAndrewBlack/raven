@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vulkan/vulkan.h>
 
 namespace raven {
@@ -29,8 +30,7 @@ public:
 	VulkanBridge &operator=(const VulkanBridge &) = delete;
 	static std::span<const std::string_view> exports();
 	bool dispatch(std::string_view name);
-	// Where a guest window's presentable surface comes from: the host display and surface that sit over the window, or nothing when the
-	// host does not show it. Without a source a guest cannot create surfaces.
+	// The host display and surface over a local window. Foreign windows present through shared pixels instead.
 	struct SurfaceSource {
 		std::function<std::optional<std::pair<void *, void *>>(uint64_t window)> create;
 		std::function<void(uint64_t window)> release;
@@ -67,15 +67,7 @@ private:
 	std::map<uint64_t, VkInstance> instances;
 	struct Physical { VkPhysicalDevice handle; uint64_t instance; };
 	std::map<uint64_t, Physical> physical;
-	// A device whose driver imports host memory (VK_EXT_external_memory_host) gives host-visible allocations memory the guest maps
-	// directly: the import alignment, the memory types that are host-visible and the query for the types a host pointer may back.
-	struct Device {
-		VkDevice handle; uint64_t physical;
-		bool host_import = false;
-		VkDeviceSize import_alignment = 0;
-		uint32_t host_visible_types = 0;
-		PFN_vkGetMemoryHostPointerPropertiesEXT host_pointer_properties = nullptr;
-	};
+	struct Device { VkDevice handle; uint64_t physical; };
 	std::map<uint64_t, Device> devices;
 	struct Queue { VkQueue handle; uint64_t device; uint32_t family, index; };
 	std::map<uint64_t, Queue> queues;
@@ -83,20 +75,15 @@ private:
 	struct Memory {
 		VkDeviceMemory handle; uint64_t device; VkDeviceSize size;
 		void *host = nullptr; uint64_t shadow = 0; VkDeviceSize offset = 0, mapped = 0;
+		uint64_t mapping_base = 0;
+		bool coherent = false;
 		std::vector<uint8_t> snapshot;
 		// The guest's shadow is a memfd the host maps as well, so comparing it with the driver's mapping never goes through the debugger
 		// interface: `view` is the host's window on the same bytes as the guest address `shadow`.
 		int shadow_file = -1;
 		uint8_t *view = nullptr;
 		size_t view_size = 0;
-		// Memory the driver imported from a memfd: the host's mapping of it, which the guest maps as well, so both see the same bytes and
-		// nothing is copied when the device works.
-		int import_file = -1;
-		uint8_t *import_host = nullptr;
-		size_t import_size = 0;
 	};
-	// Releases what an imported allocation holds on the host side, after the driver freed the memory.
-	static void release_import(Memory &memory);
 	std::map<uint64_t, Memory> memories;
 	struct Buffer { VkBuffer handle; uint64_t device; };
 	std::map<uint64_t, Buffer> buffers;
@@ -117,6 +104,13 @@ private:
 	std::map<uint64_t, uint64_t> surface_windows;
 	// The instance token each of those surfaces was created from.
 	std::map<uint64_t, uint64_t> surface_instances;
+	std::set<uint64_t> foreign_surfaces;
+	struct ForeignSwapchain;
+	std::map<uint64_t, std::shared_ptr<ForeignSwapchain>> foreign_swapchains;
+	VkResult prepare_foreign_swapchain(uint64_t token,uint64_t device,VkSwapchainKHR swapchain,
+		const VkSwapchainCreateInfoKHR &info,uint64_t window);
+	std::optional<VkResult> present_foreign(uint64_t queue,const VkPresentInfoKHR &info);
+	void release_foreign_swapchains(uint64_t device);
 	// A swapchain's surface token and the extent it was created with; a surface whose window changed size makes it out of date.
 	struct Swapchain { uint64_t surface; uint32_t width, height; };
 	std::map<uint64_t, Swapchain> swapchains;

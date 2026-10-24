@@ -1,4 +1,5 @@
 #include "objects.h"
+#include "event.h"
 #include "api.h"
 #include "handle_channel.h"
 #include "shared_file.h"
@@ -12,19 +13,6 @@
 namespace raven {
 
 static constexpr uint32_t invalid_handle=0xc0000008U, denied=0xc0000022U;
-
-static std::optional<uint32_t> access_mask(uint32_t access)
-{
-	uint32_t mapped=access & 0x001f0003U;
-	if (access & 0x80000000U) mapped|=0x120001;
-	if (access & 0x40000000U) mapped|=0x120002;
-	if (access & 0x20000000U) mapped|=0x120000;
-	if (access & 0x10000000U) mapped|=0x1f0003;
-	if (access & 0x02000000U) mapped|=0x1f0003;
-	if (access & ~0xf21f0003U)
-		return std::nullopt;
-	return mapped;
-}
 
 // A handle another process sent has not necessarily been taken in yet; looking its value up is the moment it must be.
 void NativeObjects::arrive(uint64_t handle) const
@@ -53,14 +41,14 @@ NativeObjectResult NativeObjects::create_event(uint32_t access, uint32_t type, b
 {
 	if (type>1)
 		return {0,0xc000000dU};
-	const auto mapped=access_mask(access);
+	const auto mapped=event_access(access);
 	if (!mapped)
 		return {0,0xc00000bbU};
 	std::lock_guard lock(mutex);
 	if (handles.size()>=limit || next>UINT32_MAX-4)
 		return {0,0xc000009aU};
 	const auto handle=take();
-	handles.emplace(handle,Handle{std::make_shared<Event>(type,signaled),*mapped,{}});
+	handles.emplace(handle,Handle{std::make_shared<EventObject>(type,signaled),*mapped,{}});
 	return {handle};
 }
 
@@ -69,7 +57,7 @@ NativeObjectResult NativeObjects::create_named_event(const std::u16string &name,
 	existed=false;
 	if (type>1)
 		return {0,0xc000000dU};
-	const auto mapped=access_mask(access);
+	const auto mapped=event_access(access);
 	if (!mapped)
 		return {0,0xc00000bbU};
 	std::u16string key=name;
@@ -77,11 +65,11 @@ NativeObjectResult NativeObjects::create_named_event(const std::u16string &name,
 	std::lock_guard lock(mutex);
 	if (handles.size()>=limit || next>UINT32_MAX-4)
 		return {0,0xc000009aU};
-	std::shared_ptr<Event> shared;
+	std::shared_ptr<EventObject> shared;
 	if (const auto found=named_events.find(key); found!=named_events.end()) shared=found->second.lock();
 	existed=shared!=nullptr;
 	if (!shared) {
-		shared=std::make_shared<Event>(type,signaled);
+		shared=std::make_shared<EventObject>(type,signaled);
 		named_events[key]=shared;
 	}
 	const auto handle=take();
@@ -91,7 +79,7 @@ NativeObjectResult NativeObjects::create_named_event(const std::u16string &name,
 
 NativeObjectResult NativeObjects::open_named_event(const std::u16string &name, uint32_t access)
 {
-	const auto mapped=access_mask(access);
+	const auto mapped=event_access(access);
 	if (!mapped)
 		return {0,0xc00000bbU};
 	std::u16string key=name;
@@ -107,15 +95,16 @@ NativeObjectResult NativeObjects::open_named_event(const std::u16string &name, u
 	return {handle};
 }
 
-std::pair<std::shared_ptr<NativeObjects::Event>,uint32_t> NativeObjects::event(uint64_t handle, uint32_t access) const
+std::pair<std::shared_ptr<EventObject>,uint32_t> NativeObjects::event(uint64_t handle, uint32_t access) const
 {
 	arrive(handle);
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
 	if (found==handles.end()) return {nullptr,invalid_handle};
-	if (!found->second.event) return {nullptr,0xc0000024U};
+	const auto object = found->second.event ? found->second.event : std::dynamic_pointer_cast<EventObject>(found->second.generic);
+	if (!object) return {nullptr,0xc0000024U};
 	if ((found->second.access & access)!=access) return {nullptr,denied};
-	return {found->second.event,0};
+	return {object,0};
 }
 
 NativeObjectResult NativeObjects::add_object(std::shared_ptr<KernelObject> object)
@@ -134,61 +123,31 @@ std::shared_ptr<KernelObject> NativeObjects::object(uint64_t handle) const
 	arrive(handle);
 	std::lock_guard lock(mutex);
 	const auto found=handles.find(handle);
-	return found==handles.end() ? nullptr : found->second.generic;
+	return found==handles.end() ? nullptr : found->second.generic ? found->second.generic : found->second.event;
 }
 
 int NativeObjects::signaled(uint64_t handle, uint32_t thread) const
 {
-	arrive(handle);
-	std::shared_ptr<Event> event;
-	std::shared_ptr<KernelObject> generic;
-	{
+	const auto held = object(handle);
+	if (!held) {
+		arrive(handle);
 		std::lock_guard lock(mutex);
-		const auto found=handles.find(handle);
-		if (found==handles.end()) return -2;
-		event=found->second.event;
-		generic=found->second.generic;
+		return handles.contains(handle) ? -1 : -2;
 	}
-	if (generic) return generic->signaled(thread);
-	if (event) {
-		std::lock_guard lock(event->mutex);
-		return event->signaled ? 1 : 0;
-	}
-	return -1;
+	if ((held->type_name() == u"Event" || held->type_name() == u"Mutant") && !(access_of(handle) & 0x100000))
+		return -3;
+	return held->signaled(thread);
 }
 
 void NativeObjects::consume(uint64_t handle, uint32_t thread)
 {
-	arrive(handle);
-	std::shared_ptr<Event> event;
-	std::shared_ptr<KernelObject> generic;
-	{
-		std::lock_guard lock(mutex);
-		const auto found=handles.find(handle);
-		if (found==handles.end()) return;
-		event=found->second.event;
-		generic=found->second.generic;
-	}
-	if (generic) generic->consume(thread);
-	else if (event) {
-		std::lock_guard lock(event->mutex);
-		if (event->type==1) event->signaled=false;
-	}
+	if (const auto held = object(handle)) held->consume(thread);
 }
 
 bool NativeObjects::try_consume(uint64_t handle, uint32_t thread)
 {
-	arrive(handle);
-	std::shared_ptr<KernelObject> generic;
-	{
-		std::lock_guard lock(mutex);
-		const auto found=handles.find(handle);
-		if (found==handles.end()) return false;
-		generic=found->second.generic;
-	}
-	if (generic) return generic->try_consume(thread);
-	consume(handle,thread);
-	return true;
+	const auto held = object(handle);
+	return held && held->try_consume(thread);
 }
 
 NativeObjectResult NativeObjects::duplicate(uint64_t handle, std::optional<uint32_t> access)
@@ -254,8 +213,11 @@ std::vector<uint64_t> NativeObjects::inheritable() const
 bool NativeObjects::adopt(uint64_t handle, std::shared_ptr<KernelObject> object, bool inherit)
 {
 	std::lock_guard lock(mutex);
-	if (handles.contains(handle))
+	if (handles.contains(handle)) {
+		if (std::getenv("RAVEN_TRACE_FAIL"))
+			std::fprintf(stderr, "raven: incoming handle %llx is already in use\n", static_cast<unsigned long long>(handle));
 		return false;
+	}
 	handles.emplace(handle,Handle{{},0x1f0003,{},std::move(object),inherit});
 	return true;
 }
@@ -297,28 +259,12 @@ std::atomic<int> shared_object_count{0};
 
 NativeObjectResult NativeObjects::set_event(uint64_t handle, bool signaled)
 {
-	arrive(handle);
-	if (const auto generic=object(handle)) {
-		const auto previous=generic->set_state(signaled);
-		if (previous>=0) return {uint64_t(previous)};
-	}
-	const auto [object,status]=event(handle,2);
-	if (status) return {0,status};
-	std::lock_guard lock(object->mutex);
-	const auto previous=object->signaled;
-	object->signaled=signaled;
-	if (signaled) {
-		if (object->type==0) {
-			for (const auto &waiter : object->waiters) waiter->ready=true;
-			object->waiters.clear();
-		} else if (!object->waiters.empty()) {
-			object->waiters.front()->ready=true;
-			object->waiters.pop_front();
-			object->signaled=false;
-		}
-		object->changed.notify_all();
-	}
-	return {uint64_t(previous)};
+	const auto held = object(handle);
+	if (!held) return {0,invalid_handle};
+	if (held->type_name() == u"Event" && !(access_of(handle) & 2))
+		return {0,denied};
+	const auto previous = held->set_state(signaled);
+	return previous >= 0 ? NativeObjectResult{uint64_t(previous)} : NativeObjectResult{0,0xc0000024U};
 }
 
 std::optional<std::u16string> NativeObjects::type_name(uint64_t handle) const
@@ -339,7 +285,7 @@ NativeObjectResult NativeObjects::query_event(uint64_t handle)
 	const auto [object,status]=event(handle,1);
 	if (status) return {0,status};
 	std::lock_guard lock(object->mutex);
-	return {uint64_t(object->type) | (uint64_t(object->signaled)<<32)};
+	return {uint64_t(object->type) | (uint64_t(object->is_set())<<32)};
 }
 
 NativeObjectResult NativeObjects::wait(uint64_t handle, std::optional<int64_t> timeout,
@@ -349,7 +295,7 @@ NativeObjectResult NativeObjects::wait(uint64_t handle, std::optional<int64_t> t
 	if (status) return {0,status};
 	if (timeout && *timeout>0) return {0,0xc00000bbU};
 	std::unique_lock lock(object->mutex);
-	if (!object->signaled) {
+	if (!object->take()) {
 		if (timeout && !*timeout) return {0,0x102};
 		if (object->waiters.size()>=10000) return {0,0xc000009aU};
 		const auto now=std::chrono::steady_clock::now();
@@ -360,15 +306,23 @@ NativeObjectResult NativeObjects::wait(uint64_t handle, std::optional<int64_t> t
 			if (ticks<=uint64_t(room)/100)
 				expires=now+std::chrono::nanoseconds(ticks*100);
 		}
-		const auto waiter=std::make_shared<Event::Waiter>();
+		const auto waiter=std::make_shared<EventObject::Waiter>();
 		object->waiters.push_back(waiter);
-		if (!object->changed.wait_until(lock,std::min(expires,deadline),[&] { return waiter->ready; })) {
-			std::erase(object->waiters,waiter);
-			return expires<=deadline ? NativeObjectResult{0,0x102} : NativeObjectResult{0,0,true};
+		const auto until = std::min(expires,deadline);
+		while (!waiter->ready) {
+			if (object->shared && object->take()) {
+				std::erase(object->waiters,waiter);
+				return {};
+			}
+			const auto now = std::chrono::steady_clock::now();
+			if (now >= until) {
+				std::erase(object->waiters,waiter);
+				return expires<=deadline ? NativeObjectResult{0,0x102} : NativeObjectResult{0,0,true};
+			}
+			object->changed.wait_until(lock,object->shared ? std::min(until,now+std::chrono::milliseconds(5)) : until);
 		}
 		return {};
 	}
-	if (object->type==1) object->signaled=false;
 	return {};
 }
 
@@ -376,6 +330,15 @@ size_t NativeObjects::count() const
 {
 	std::lock_guard lock(mutex);
 	return handles.size();
+}
+
+std::vector<uint64_t> NativeObjects::values() const
+{
+	std::lock_guard lock(mutex);
+	std::vector<uint64_t> result;
+	result.reserve(handles.size());
+	for (const auto &[value, handle] : handles) result.push_back(value);
+	return result;
 }
 
 size_t NativeObjects::waiting(uint64_t handle) const

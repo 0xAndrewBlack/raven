@@ -9,8 +9,10 @@
 #include <map>
 #include <mutex>
 #include <cerrno>
+#include <cstdio>
 #include <csignal>
 #include <fcntl.h>
+#include <poll.h>
 #include <vector>
 #include <cstdlib>
 #include <sstream>
@@ -29,7 +31,13 @@ namespace {
 
 std::atomic<int> live{0};
 std::mutex known_mutex;
-std::map<pid_t, std::weak_ptr<ProcessObject>> known;
+
+std::map<pid_t, std::shared_ptr<ProcessObject>> &known_children()
+{
+	// Child IPC and exit status outlive the last guest handle. Construct after the channel registry so cleanup runs before it.
+	static std::map<pid_t, std::shared_ptr<ProcessObject>> children;
+	return children;
+}
 
 }
 
@@ -97,8 +105,11 @@ void ProcessObject::reap() const
 		if (exit_file >= 0 && ::pread(exit_file, &whole, sizeof whole, 0) == ssize_t(sizeof whole))
 			code = whole;
 	}
-	else
+	else {
 		code = 0xc0000005U;
+		if (std::getenv("RAVEN_TRACE_FAIL"))
+			std::fprintf(stderr, "raven: process %d ended with host signal %d\n", int(pid), WTERMSIG(status));
+	}
 }
 
 void ProcessObject::terminate(uint32_t exit)
@@ -288,13 +299,13 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 	auto object = std::make_shared<ProcessObject>(child);
 	object->exit_file = exit_kept;
 	if (channel_pair[0] >= 0) {
-		object->channel = std::make_unique<HandleChannel>(channel_pair[0], handle_range_to_child);
+		object->channel = std::make_unique<HandleChannel>(channel_pair[0]);
 		add_child_channel(object->channel.get());
 	}
 	object->name = from_utf8(launch.image.filename().string());
 	{
 		std::lock_guard lock(known_mutex);
-		known[child] = object;
+		known_children()[child] = object;
 	}
 	return object;
 }
@@ -302,23 +313,59 @@ std::shared_ptr<ProcessObject> spawn_child(const ChildLaunch &launch, uint32_t &
 std::shared_ptr<ProcessObject> find_child(pid_t pid)
 {
 	std::lock_guard lock(known_mutex);
+	auto &known = known_children();
 	const auto found = known.find(pid);
-	return found == known.end() ? nullptr : found->second.lock();
+	return found == known.end() ? nullptr : found->second;
+}
+
+std::vector<std::shared_ptr<ProcessObject>> retained_children()
+{
+	std::vector<std::shared_ptr<ProcessObject>> result;
+	std::lock_guard lock(known_mutex);
+	for (const auto &[pid, object] : known_children()) result.push_back(object);
+	return result;
 }
 
 std::vector<std::shared_ptr<ProcessObject>> live_children()
 {
 	std::vector<std::shared_ptr<ProcessObject>> result;
-	std::lock_guard lock(known_mutex);
-	for (const auto &[pid, weak] : known)
-		if (const auto object = weak.lock(); object && !object->exited())
-			result.push_back(object);
+	std::vector<std::shared_ptr<ProcessObject>> retired;
+	{
+		std::lock_guard lock(known_mutex);
+		auto &known = known_children();
+		for (auto item = known.begin(); item != known.end();) {
+			if (!item->second->exited()) {
+				result.push_back(item->second);
+				++item;
+			} else {
+				retired.push_back(std::move(item->second));
+				item = known.erase(item);
+			}
+		}
+	}
 	return result;
 }
 
 bool children_running()
 {
 	return live.load() > 0;
+}
+
+void wait_suspended_process(int descriptor, NativeObjects &objects)
+{
+	if (descriptor < 0)
+		return;
+	::fcntl(descriptor, F_SETFD, FD_CLOEXEC);
+	for (;;) {
+		receive_handles(objects);
+		pollfd gate{descriptor, POLLIN, 0};
+		const int ready = ::poll(&gate, 1, 10);
+		if (ready < 0 && errno == EINTR)
+			continue;
+		if (ready != 0)
+			break;
+	}
+	::close(descriptor);
 }
 
 namespace {

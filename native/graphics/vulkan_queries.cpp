@@ -8,10 +8,11 @@
 namespace raven {
 
 // Names are kept in byte order because the guest provider binary searches its export table.
-static constexpr std::array<std::string_view, 8> names{
-	"vkGetPhysicalDeviceFeatures2", "vkGetPhysicalDeviceFormatProperties", "vkGetPhysicalDeviceFormatProperties2",
-	"vkGetPhysicalDeviceImageFormatProperties", "vkGetPhysicalDeviceMemoryProperties2", "vkGetPhysicalDeviceProperties2",
-	"vkGetPhysicalDeviceQueueFamilyProperties2", "vkGetPhysicalDeviceSparseImageFormatProperties"
+static constexpr std::array<std::string_view, 13> names{
+	"vkGetPhysicalDeviceFeatures2", "vkGetPhysicalDeviceFeatures2KHR", "vkGetPhysicalDeviceFormatProperties", "vkGetPhysicalDeviceFormatProperties2",
+	"vkGetPhysicalDeviceFormatProperties2KHR", "vkGetPhysicalDeviceImageFormatProperties", "vkGetPhysicalDeviceMemoryProperties2",
+	"vkGetPhysicalDeviceMemoryProperties2KHR", "vkGetPhysicalDeviceProperties2", "vkGetPhysicalDeviceProperties2KHR",
+	"vkGetPhysicalDeviceQueueFamilyProperties2", "vkGetPhysicalDeviceQueueFamilyProperties2KHR", "vkGetPhysicalDeviceSparseImageFormatProperties"
 };
 
 std::span<const std::string_view> vulkan_query_names() { return names; }
@@ -80,6 +81,8 @@ bool VulkanBridge::dispatch_queries(std::string_view name)
 {
 	if (std::find(names.begin(), names.end(), name) == names.end())
 		return false;
+	if (name.ends_with("KHR"))
+		name.remove_suffix(3);
 	auto a = process.api_arguments(name == "vkGetPhysicalDeviceSparseImageFormatProperties" ? 8 : name == "vkGetPhysicalDeviceImageFormatProperties" ? 7 :
 		name == "vkGetPhysicalDeviceQueueFamilyProperties2" || name == "vkGetPhysicalDeviceFormatProperties" || name == "vkGetPhysicalDeviceFormatProperties2" ? 3 : 2);
 	if (name == "vkGetPhysicalDeviceFormatProperties" || name == "vkGetPhysicalDeviceFormatProperties2" || name == "vkGetPhysicalDeviceImageFormatProperties")

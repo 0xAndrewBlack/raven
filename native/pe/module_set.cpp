@@ -53,7 +53,7 @@ PEModule::PEModule(std::string name, ModuleBytes bytes, uint64_t base, bool relo
 			export_names.emplace(export_name, index);
 }
 
-PEModule &ModuleSet::add(std::string name, ModuleBytes bytes)
+PEModule &ModuleSet::add(std::string name, ModuleBytes bytes, std::function<bool(uint64_t, uint64_t)> available)
 {
 	const PEImage image(bytes);
 	const uint64_t limit = image.is_64 ? 0x800000000000ULL : 0x100000000ULL;
@@ -67,6 +67,8 @@ PEModule &ModuleSet::add(std::string name, ModuleBytes bytes)
 			if (candidate < end && start < candidate + image.image_size)
 				return (end + 65535) & ~uint64_t(65535);
 		}
+		if (available && !available(candidate, image.image_size))
+			return candidate + 65536;
 		return uint64_t(0);
 	};
 	if (overlap(base)) {
@@ -101,11 +103,11 @@ PEModule &ModuleSet::add(std::string name, ModuleBytes bytes, uint64_t base)
 	return result;
 }
 
-PEModule &ModuleSet::add_data(std::string name, ModuleBytes bytes)
+PEModule &ModuleSet::add_data(std::string name, ModuleBytes bytes, std::function<bool(uint64_t, uint64_t)> available)
 {
 	adding_data = true;
 	try {
-		auto &module = add(std::move(name), std::move(bytes));
+		auto &module = add(std::move(name), std::move(bytes), std::move(available));
 		adding_data = false;
 		data_names.insert(module.name);
 		return module;

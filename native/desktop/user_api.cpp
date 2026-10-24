@@ -27,6 +27,17 @@ void write_rect(ApiCall &call, uint64_t address, const Rect &rect)
 	call.write(address, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&rect), 16));
 }
 
+std::vector<uint8_t> raw_mouse_bytes(const std::array<int32_t,6> &report,size_t width,uint64_t wparam=0)
+{
+	const size_t header=width==4 ? 16 : 24;
+	std::vector<uint8_t> bytes(header+24);
+	const auto put=[&](size_t at,uint64_t value,size_t length) { std::memcpy(bytes.data()+at,&value,length); };
+	put(4,bytes.size(),4); put(8,1,width); put(8+width,wparam,width);
+	put(header+4,uint16_t(report[2]),2); put(header+6,uint16_t(int16_t(report[3])),2);
+	put(header+12,uint32_t(report[0]),4); put(header+16,uint32_t(report[1]),4);
+	return bytes;
+}
+
 }
 
 void NativeWindows::register_api(ApiRegistry &registry)
@@ -172,6 +183,71 @@ void NativeWindows::register_api(ApiRegistry &registry)
 	});
 	// Raw input: the mouse (usage page 1, usage 2) is the device that reports; RIDEV_REMOVE ends the registration and
 	// RIDEV_NOLEGACY leaves out the ordinary mouse messages. Keyboards keep their ordinary messages.
+	registry.add("GetRawInputDeviceList", 3, [](ApiCall &call) {
+		const size_t width = call.pointer_width(), size = width == 4 ? 8 : 16;
+		if (!call[1] || call.u32(2) != size || (call[0] & 3)) {
+			call.fail(87, UINT32_MAX);
+			return;
+		}
+		if (!call[0]) {
+			call.store<uint32_t>(call[1], 1);
+			call.ret(0);
+			return;
+		}
+		if (!call.load<uint32_t>(call[1])) {
+			call.store<uint32_t>(call[1], 1);
+			call.fail(122, UINT32_MAX);
+			return;
+		}
+		std::vector<uint8_t> bytes(size);
+		bytes[0] = 1;
+		call.write(call[0], bytes);
+		call.ret(1);
+	});
+	for (const auto suffix : {std::string("A"), std::string("W")}) {
+		registry.add("GetRawInputDeviceInfo" + suffix, 4, [suffix](ApiCall &call) {
+			if (call[0] != 1 || !call[3] || (call[2] & 3)) {
+				call.fail(call[0] != 1 ? 6 : 87, UINT32_MAX);
+				return;
+			}
+			std::vector<uint8_t> bytes;
+			uint32_t required = 0;
+			if (call.u32(1) == 0x20000007U) {
+				const std::u16string name = u"\\\\?\\RAVEN#POINTER#0";
+				required = uint32_t(name.size() + 1);
+				bytes.resize(required * (suffix == "W" ? 2 : 1));
+				if (suffix == "W")
+					std::memcpy(bytes.data(), name.c_str(), bytes.size());
+				else
+					for (size_t index = 0; index < name.size(); ++index)
+						bytes[index] = uint8_t(name[index]);
+			} else if (call.u32(1) == 0x2000000bU) {
+				const uint32_t info[8] = {32, 0, 1, 3, 0, 1, 0, 0};
+				required = sizeof(info);
+				bytes.resize(sizeof(info));
+				std::memcpy(bytes.data(), info, sizeof(info));
+			} else {
+				call.fail(call.u32(1) == 0x20000005U ? 50 : 87, UINT32_MAX);
+				return;
+			}
+			if (!call[2]) {
+				call.store<uint32_t>(call[3], required);
+				call.ret(0);
+				return;
+			}
+			if (call.load<uint32_t>(call[3]) < required) {
+				call.store<uint32_t>(call[3], required);
+				call.fail(122, UINT32_MAX);
+				return;
+			}
+			if (call.u32(1) == 0x2000000bU && call.load<uint32_t>(call[2]) != required) {
+				call.fail(87, UINT32_MAX);
+				return;
+			}
+			call.write(call[2], bytes);
+			call.ret(bytes.size());
+		});
+	}
 	registry.add("RegisterRawInputDevices", 3, [this](ApiCall &call) {
 		const size_t width = call.pointer_width(), size = width == 4 ? 12 : 16;
 		if (!call[0] || !call.u32(1) || call.u32(2) != size) {
@@ -219,21 +295,57 @@ void NativeWindows::register_api(ApiRegistry &registry)
 			call.fail(122, UINT32_MAX);
 			return;
 		}
-		std::vector<uint8_t> bytes(size);
-		const auto put = [&](size_t at, uint64_t value, size_t length) { std::memcpy(bytes.data() + at, &value, length); };
-		const auto &report = found->second;
-		put(0, 0, 4);
-		put(4, total, 4);
-		put(8, 1, width);
-		if (size == total) {
-			put(header, 0, 2);
-			put(header + 4, uint16_t(report[2]), 2);
-			put(header + 6, uint16_t(int16_t(report[3])), 2);
-			put(header + 12, uint32_t(report[0]), 4);
-			put(header + 16, uint32_t(report[1]), 4);
-		}
+		auto bytes = raw_mouse_bytes(found->second, width);
+		bytes.resize(size);
 		call.write(call[2], bytes);
 		call.ret(size);
+	});
+	registry.add("GetRawInputBuffer", 3, [this](ApiCall &call) {
+		const size_t width=call.pointer_width(), header=width==4 ? 16 : 24;
+		if (!call[1] || call.u32(2)!=header || (call[0] & (width==4 ? 7U : 3U))) {
+			call.fail(87,UINT32_MAX);
+			return;
+		}
+		try {
+			const auto capacity=call[0] ? call.load<uint32_t>(call[1]) : 0;
+			const auto me=environment.thread_id();
+			if (presentation.poll)
+				for (const auto &event : presentation.poll(std::chrono::milliseconds(0))) pending_events.push_back(event);
+			for (auto remaining=pending_events.size();remaining;--remaining) {
+				const auto event=pending_events.front(); pending_events.pop_front();
+				if (event.window && (!objects.window(event.window) || !objects.window(event.window)->visible)) continue;
+				const auto thread=owner(event.window ? event.window : focus);
+				if (thread && thread!=me) pending_events.push_back(event);
+				else receive(event);
+			}
+			std::vector<uint8_t> bytes;
+			std::set<uint64_t> taken;
+			for (const auto &message : messages) {
+				if (message.message!=0xff || !(message.kinds & 0x400) || (message.thread && message.thread!=me)) continue;
+				const auto found=raw_reports.find(message.lparam);
+				if (found==raw_reports.end()) continue;
+				// WOW64 buffers carry the native 24-byte header, unlike GetRawInputData's 16-byte header.
+				const auto record=raw_mouse_bytes(found->second,8,message.wparam);
+				if (!call[0] || bytes.size()+record.size()>capacity) {
+					if (bytes.empty()) {
+						call.store<uint32_t>(call[1],uint32_t(record.size()));
+						if (call[0]) call.fail(122,UINT32_MAX); else call.ret(0);
+						return;
+					}
+					break;
+				}
+				bytes.insert(bytes.end(),record.begin(),record.end());
+				taken.insert(message.lparam);
+			}
+			if (!call[0]) call.store<uint32_t>(call[1],0);
+			else if (!bytes.empty()) call.write(call[0],bytes);
+			// Copy first: a bad output pointer must leave the reports available for a later read.
+			std::erase_if(messages,[&](const Message &message) {
+				return message.message==0xff && (message.kinds & 0x400) && (!message.thread || message.thread==me) && taken.contains(message.lparam);
+			});
+			for (const auto handle : taken) raw_reports.erase(handle);
+			call.ret(taken.size());
+		} catch (const ApiFault &) { call.fail(998,UINT32_MAX); }
 	});
 	registry.add("SetCursorPos", 2, [this](ApiCall &call) {
 		cursor_x = call.i32(0);

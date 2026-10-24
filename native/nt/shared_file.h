@@ -209,6 +209,7 @@ public:
 
 	void *data = nullptr;
 	size_t size = 0;
+	int file_descriptor() const { return descriptor; }
 
 private:
 

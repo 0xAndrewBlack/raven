@@ -1,5 +1,8 @@
 #include "child_process.h"
 #include "kernel_context.h"
+#include "mutex.h"
+#include "event.h"
+#include "security_attributes.h"
 #include "shared_file.h"
 #include "text.h"
 
@@ -14,39 +17,32 @@ namespace {
 constexpr uint64_t current_thread_pseudo = UINT64_MAX - 1;
 constexpr uint32_t wait_timeout = 0x102, wait_failed = UINT32_MAX, wait_io_completion = 0xc0, wait_abandoned = 0x80;
 
-// A mutex lives in a block of shared memory when it has a name, so processes of the prefix contend for it; an owner is a process and a thread.
-struct MutexState {
-	std::atomic<uint64_t> owner{0};
-	std::atomic<int32_t> recursion{0};
-};
+uint32_t thread_token_error(uint32_t status)
+{
+	switch (status) {
+	case 0xc0000005U: return 998;
+	case 0xc0000022U: return 5;
+	case 0xc0000008U: case 0xc0000024U: return 6;
+	case 0xc000007cU: return 1008;
+	case 0xc00000a5U: return 1346;
+	case 0xc00000a6U: return 1347;
+	case 0xc00000a8U: return 1349;
+	case 0xc00000bbU: return 50;
+	default: return 87;
+	}
+}
 
-class MutexObject : public KernelObject {
-public:
-	std::u16string_view type_name() const override { return u"Mutant"; }
-	uint64_t me(uint32_t thread) const { return shared ? (uint64_t(::getpid()) << 32) | thread : thread; }
-	int signaled(uint32_t thread) const override
-	{
-		const auto holder = state->owner.load();
-		return holder == 0 || holder == me(thread);
-	}
-	bool try_consume(uint32_t thread) override
-	{
-		const auto self = me(thread);
-		if (state->owner.load() == self) {
-			++state->recursion;
-			return true;
-		}
-		uint64_t free = 0;
-		if (!state->owner.compare_exchange_strong(free, self))
-			return false;
-		state->recursion = 1;
-		return true;
-	}
-	void consume(uint32_t thread) override { try_consume(thread); }
-	MutexState local;
-	MutexState *state = &local;
-	std::shared_ptr<SharedFile> shared;
-};
+uint32_t thread_access(uint32_t requested)
+{
+	uint32_t access = requested & 0x1fffff;
+	if (requested & (0x10000000U | 0x02000000U)) access |= 0x1fffff;
+	if (requested & 0x80000000U) access |= 0x20048;
+	if (requested & 0x40000000U) access |= 0x20037;
+	if (requested & 0x20000000U) access |= 0x120000;
+	if (access & 0x40) access |= 0x800;
+	if (access & 0x20) access |= 0x400;
+	return access;
+}
 
 struct SemaphoreState {
 	std::atomic<int32_t> count{0};
@@ -160,7 +156,7 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	// Thread handles are per object; one thread object per guest thread keeps handle identity stable.
 	auto handle_of = std::make_shared<std::map<uint32_t, std::shared_ptr<ThreadObject>>>();
 	const auto thread_from = [&threads, &objects](uint64_t handle) -> std::shared_ptr<GuestThread> {
-		if (handle == current_thread_pseudo)
+		if (handle == current_thread_pseudo || handle == 0xfffffffeULL)
 			return threads.find(threads.current_id());
 		const auto object = objects.object_as<ThreadObject>(handle);
 		return object ? object->thread : nullptr;
@@ -206,7 +202,7 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			const auto current = states();
 			for (const auto state : current)
 				if (state < 0) {
-					call.set_last_error(6);
+					call.set_last_error(state == -3 ? 5 : 6);
 					return wait_failed;
 				}
 			if (all) {
@@ -263,65 +259,80 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	};
 	registry.add("WaitForMultipleObjects", 4, [multiple](ApiCall &call) { multiple(call, false); });
 	registry.add("WaitForMultipleObjectsEx", 5, [multiple](ApiCall &call) { multiple(call, call.u32(4)); });
-	// Waits for handles or for window input: the wait code one past the last handle reports a message.
-	const auto message_wait = [&context, &objects, &threads, handle_at](ApiCall &call, uint32_t count, uint64_t array, bool all, uint32_t milliseconds) {
-		if (count > 63) {
-			call.fail(87, wait_failed);
-			return;
+	// The input event follows the explicit handles, so a signaled handle wins a wait-any tie.
+	const auto message_wait = [&context, &objects, &threads, handle_at, run_apcs](ApiCall &call, uint32_t count, uint64_t array,
+			uint32_t milliseconds, uint32_t mask, uint32_t flags) -> uint32_t {
+		if (count > 63 || (count && !array) || (flags & ~7U) || (mask & ~0x1dffU)) {
+			call.set_last_error(87);
+			return wait_failed;
 		}
 		std::vector<uint64_t> handles(count);
-		for (uint32_t index = 0; index < count; ++index)
+		for (uint32_t index = 0; index < count; ++index) {
 			handles[index] = handle_at(call, array, index);
+			if (std::find(handles.begin(), handles.begin() + index, handles[index]) != handles.begin() + index) {
+				call.set_last_error(87);
+				return wait_failed;
+			}
+		}
 		const uint32_t id = threads.current_id();
+		const auto me = threads.find(id);
+		const bool all = flags & 1, alertable = flags & 2, available = flags & 4;
+		const auto input = [&] {
+			const auto status = context.queue_status ? context.queue_status(id, mask, false) : 0;
+			return (available ? status >> 16 : status & 0xffffU) != 0;
+		};
 		std::optional<std::chrono::steady_clock::time_point> wake;
 		if (milliseconds != UINT32_MAX)
 			wake = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
-		const auto ready = [&]() -> std::optional<uint32_t> {
-			if (context.message_ready && context.message_ready(id))
-				return count;
-			std::vector<int> states;
-			for (const auto handle : handles)
-				states.push_back(objects.signaled(handle, id));
-			if (all && count && std::all_of(states.begin(), states.end(), [](int s) { return s == 1; })) {
-				bool taken = true;
-				for (const auto handle : handles)
-					taken = objects.try_consume(handle, id) && taken;
-				if (taken)
-					return 0;
-			}
-			if (!all)
-				for (size_t index = 0; index < states.size(); ++index)
-					if (states[index] == 1 && objects.try_consume(handles[index], id))
-						return uint32_t(index);
-			return std::nullopt;
-		};
 		for (;;) {
-			if (const auto code = ready()) {
-				call.ret(*code);
-				return;
+			std::vector<int> states;
+			for (const auto handle : handles) {
+				const int state = handle == current_thread_pseudo ? -2 : objects.signaled(handle, id);
+				if (state < 0) {
+					call.set_last_error(state == -3 ? 5 : 6);
+					return wait_failed;
+				}
+				states.push_back(state);
 			}
-			if (milliseconds == 0 || (wake && std::chrono::steady_clock::now() >= *wake)) {
-				call.ret(wait_timeout);
-				return;
+			if (all) {
+				if (std::all_of(states.begin(), states.end(), [](int state) { return state == 1; }) && input()) {
+					bool taken = true;
+					for (const auto handle : handles) taken = objects.try_consume(handle, id) && taken;
+					if (taken) return 0;
+				}
+			} else {
+				for (size_t index = 0; index < states.size(); ++index)
+					if (states[index] == 1 && objects.try_consume(handles[index], id)) return uint32_t(index);
+				if (input()) return count;
 			}
-			// Input reaches the queue from the host, so a thread that waits for it is waiting on the host, never deadlocked.
+			if (alertable && !me->apcs.empty() && run_apcs()) return wait_io_completion;
+			if (!milliseconds || (wake && std::chrono::steady_clock::now() >= *wake)) return wait_timeout;
+			auto until = wake;
+			for (const auto handle : handles)
+				if (const auto object = objects.object(handle))
+					if (const auto due = object->wakes_at(); due && (!until || *due < *until)) until = due;
 			HostWait waiting;
 			threads.block([&] {
-				if (context.message_ready && context.message_ready(id))
-					return true;
-				for (const auto handle : handles)
-					if (objects.signaled(handle, id) == 1)
-						return true;
-				return false;
-			}, wake);
+				if (alertable && !me->apcs.empty()) return true;
+				bool any = false, every = true;
+				for (const auto handle : handles) {
+					const int state = objects.signaled(handle, id);
+					if (state < 0) return true;
+					any |= state == 1;
+					every &= state == 1;
+				}
+				return all ? every && input() : any || input();
+			}, until);
 		}
 	};
-	registry.add("MsgWaitForMultipleObjects", 5, [message_wait](ApiCall &call) { message_wait(call, call.u32(0), call[1], call.u32(2), call.u32(3)); });
-	registry.add("MsgWaitForMultipleObjectsEx", 5, [message_wait](ApiCall &call) { message_wait(call, call.u32(0), call[1], call.u32(4) & 1, call.u32(2)); });
-	// WaitMessage: the thread sleeps until a message arrives in its queue, as a wait on no objects with no timeout.
+	registry.add("MsgWaitForMultipleObjects", 5, [message_wait](ApiCall &call) {
+		call.ret(message_wait(call, call.u32(0), call[1], call.u32(3), call.u32(4), call.u32(2) ? 1 : 0));
+	});
+	registry.add("MsgWaitForMultipleObjectsEx", 5, [message_wait](ApiCall &call) {
+		call.ret(message_wait(call, call.u32(0), call[1], call.u32(2), call.u32(3), call.u32(4)));
+	});
 	registry.add("WaitMessage", 0, [message_wait](ApiCall &call) {
-		message_wait(call, 0, 0, false, UINT32_MAX);
-		call.ret(1);
+		call.ret(message_wait(call, 0, 0, UINT32_MAX, 0x1cff, 0) == wait_failed ? 0 : 1);
 	});
 	registry.add("SignalObjectAndWait", 4, [wait, &objects](ApiCall &call) {
 		if (objects.signaled(call[0], 0) == -2) {
@@ -422,13 +433,17 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		threads.terminate(thread, call.u32(1));
 		call.ret(1);
 	});
-	registry.add("SuspendThread", 1, [thread_from](ApiCall &call) {
+	registry.add("SuspendThread", 1, [thread_from, &threads](ApiCall &call) {
 		const auto thread = thread_from(call[0]);
 		if (!thread) {
 			call.fail(6, UINT32_MAX);
 			return;
 		}
-		call.ret(uint32_t(thread->suspend_count++));
+		const auto previous = threads.suspend(*thread);
+		if (previous == UINT32_MAX)
+			call.fail(5, UINT32_MAX);
+		else
+			call.ret(previous);
 	});
 	registry.add("ResumeThread", 1, [thread_from, &objects](ApiCall &call) {
 		// The main thread of a child that was started suspended runs when this opens its gate.
@@ -511,12 +526,145 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 	});
 	registry.add("SetThreadPriorityBoost", 2, [](ApiCall &call) { call.ret(1); });
 	registry.add("SetThreadInformation", 4, [](ApiCall &call) { call.ret(1); });
+	const auto set_thread_token = [thread_from, &objects, &threads](uint64_t handle, uint64_t token_handle) -> uint32_t {
+		const auto thread = thread_from(handle);
+		const auto child = objects.object_as<ChildThreadObject>(handle);
+		if (!thread && !child)
+			return 0xc0000008U;
+		if (handle != current_thread_pseudo && handle != 0xfffffffeULL && !(objects.access_of(handle) & 0x80))
+			return 0xc0000022U;
+		const auto token = token_handle ? objects.object_as<AccessToken>(token_handle) : nullptr;
+		if (token_handle && !token)
+			return 0xc0000008U;
+		if (token && !(objects.access_of(token_handle) & 4))
+			return 0xc0000022U;
+		if (token && token->data().type != 2)
+			return 0xc00000a8U;
+		if (thread) {
+			if (thread->state == GuestThread::State::done)
+				return 0xc000004bU;
+			thread->impersonation = token;
+			return 0;
+		}
+		const auto owner = child->owner();
+		if (owner->exited())
+			return 0xc000004bU;
+		if (!owner->channel)
+			return 0xc00000bbU;
+		InheritedHandle request;
+		request.kind = "process:thread-token-set";
+		request.flags = 1;
+		if (token) {
+			InheritedHandle record;
+			token->describe(record);
+			record.handle_access = objects.access_of(token_handle);
+			const auto made = owner->channel->send(objects, threads, std::move(record), 0);
+			if (made.status) return made.status;
+			request.handle = made.value;
+		}
+		const auto answer = owner->channel->request_process(objects, threads, std::move(request));
+		return answer ? answer->access : 0xc0000001U;
+	};
+	registry.add("NtSetInformationThread", 4, [set_thread_token](ApiCall &call) {
+		if (call.u32(1) != 5) { call.ret(0xc0000003U); return; }
+		if (call.u32(3) != call.pointer_width()) { call.ret(0xc0000004U); return; }
+		try {
+			call.ret(set_thread_token(call[0], call.load_pointer(call[2])));
+		} catch (const ApiFault &) { call.ret(0xc0000005U); }
+	});
+	registry.add("SetThreadToken", 2, [set_thread_token](ApiCall &call) {
+		try {
+			const auto status = set_thread_token(call[0] ? call.load_pointer(call[0]) : current_thread_pseudo, call[1]);
+			if (status) call.fail(thread_token_error(status));
+			else call.ret(1);
+		} catch (const ApiFault &) { call.fail(998); }
+	});
+	registry.add("RevertToSelf", 0, [&threads](ApiCall &call) {
+		threads.current().impersonation.reset();
+		call.ret(1);
+	});
+	registry.add("ImpersonateSelf", 1, [&context, &threads](ApiCall &call) {
+		if (call.u32(0) > 3) { call.fail(87); return; }
+		auto token = std::make_shared<AccessToken>(*context.process_token);
+		token->set_type(2);
+		token->set_impersonation_level(call.u32(0));
+		threads.current().impersonation = std::move(token);
+		call.ret(1);
+	});
+	registry.add("ImpersonateLoggedOnUser", 1, [&objects, &threads](ApiCall &call) {
+		auto token = objects.object_as<AccessToken>(call[0]);
+		if (!token) { call.fail(6); return; }
+		const auto data = token->data();
+		const uint32_t needed = data.type == 1 ? 0xa : 0xc;
+		if ((objects.access_of(call[0]) & needed) != needed) { call.fail(5); return; }
+		if (data.type == 2 && data.impersonation_level < 2) { call.fail(1346); return; }
+		if (data.type == 1) {
+			token = std::make_shared<AccessToken>(*token);
+			token->set_type(2);
+			token->set_impersonation_level(2);
+		}
+		threads.current().impersonation = std::move(token);
+		call.ret(1);
+	});
+	const auto open_thread_token = [thread_from, &objects, &threads](ApiCall &call, bool native, uint32_t attributes, size_t output) {
+		const auto fail = [&](uint32_t status) {
+			if (native) call.ret(status);
+			else call.fail(thread_token_error(status));
+		};
+		try {
+			call.process.validate_write_memory(call[output], call.pointer_width());
+			const auto thread = thread_from(call[0]);
+			const auto child = objects.object_as<ChildThreadObject>(call[0]);
+			if (!thread && !child) { fail(0xc0000008U); return; }
+			if (call[0] != current_thread_pseudo && call[0] != 0xfffffffeULL && !(objects.access_of(call[0]) & 0x840)) {
+				fail(0xc0000022U);
+				return;
+			}
+			const auto access = token_access(call.u32(1));
+			if (!access || (attributes & ~2U)) { fail(0xc000000dU); return; }
+			std::shared_ptr<AccessToken> token;
+			if (thread) {
+				token = thread->impersonation;
+			} else {
+				const auto owner = child->owner();
+				if (owner->exited() || !owner->channel) { fail(0xc0000008U); return; }
+				InheritedHandle request;
+				request.kind = "process:thread-token-open";
+				request.flags = 1;
+				const auto answer = owner->channel->request_process(objects, threads, std::move(request));
+				if (!answer || answer->access || answer->descriptor < 0) {
+					if (answer && answer->descriptor >= 0) ::close(answer->descriptor);
+					fail(answer && answer->access ? answer->access : 0xc0000001U);
+					return;
+				}
+				token = std::make_shared<AccessToken>(answer->descriptor);
+			}
+			if (!token) { fail(0xc000007cU); return; }
+			if (!token->data().impersonation_level) { fail(0xc00000a6U); return; }
+			const auto caller = threads.current().impersonation;
+			if (!call.u32(2) && caller && caller->data().impersonation_level < 2) { fail(0xc00000a5U); return; }
+			const auto made = objects.add_object(token);
+			if (made.status) { fail(made.status); return; }
+			objects.set_access(made.value, *access);
+			objects.set_inherit(made.value, (attributes & 2) != 0);
+			call.store_pointer(call[output], made.value);
+			call.ret(native ? 0 : 1);
+		} catch (const ApiFault &) { fail(0xc0000005U); }
+		catch (const std::runtime_error &) { fail(0xc0000005U); }
+	};
+	registry.add("OpenThreadToken", 4, [open_thread_token](ApiCall &call) { open_thread_token(call, false, 0, 3); });
+	registry.add("NtOpenThreadToken", 4, [open_thread_token](ApiCall &call) { open_thread_token(call, true, 0, 3); });
+	registry.add("NtOpenThreadTokenEx", 5, [open_thread_token](ApiCall &call) { open_thread_token(call, true, call.u32(3), 4); });
 	// NtQueryInformationThread(thread, class, buffer, length, written): THREAD_BASIC_INFORMATION (class 0) with the thread's TEB and
 	// client id, and whether I/O is pending for it (ThreadIsIoPending, 16), which it never is when asked.
-	registry.add("NtQueryInformationThread", 5, [thread_from](ApiCall &call) {
+	registry.add("NtQueryInformationThread", 5, [thread_from, &objects](ApiCall &call) {
 		const auto thread = thread_from(call[0]);
 		if (!thread) {
 			call.ret(0xc0000008U);
+			return;
+		}
+		if (call[0] != current_thread_pseudo && call[0] != 0xfffffffeULL && !(objects.access_of(call[0]) & 0x840)) {
+			call.ret(0xc0000022U);
 			return;
 		}
 		const uint32_t type = call.u32(1);
@@ -542,12 +690,23 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			call.ret(0xc0000004U);
 			return;
 		}
-		call.write(call[2], value);
-		if (call[4])
-			call.store<uint32_t>(call[4], uint32_t(value.size()));
-		call.ret(0);
+		try {
+			call.process.validate_write_memory(call[2], value.size());
+			if (call[4])
+				call.process.validate_write_memory(call[4], 4);
+			call.write(call[2], value);
+			if (call[4])
+				call.store<uint32_t>(call[4], uint32_t(value.size()));
+			call.ret(0);
+		} catch (const std::runtime_error &) {
+			call.ret(0xc0000005U);
+		}
 	});
-	registry.add("GetThreadId", 1, [thread_from](ApiCall &call) {
+	registry.add("GetThreadId", 1, [&objects, thread_from](ApiCall &call) {
+		if (objects.object_as<ChildThreadObject>(call[0])) {
+			call.ret(1);
+			return;
+		}
 		const auto thread = thread_from(call[0]);
 		call.ret(thread ? thread->id : 0);
 		if (!thread) call.set_last_error(6);
@@ -581,7 +740,58 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		if (!object)
 			object = std::make_shared<ThreadObject>(thread);
 		const auto made = objects.add_object(object);
+		if (!made.status) {
+			objects.set_access(made.value, thread_access(call.u32(0)));
+			objects.set_inherit(made.value, call.u32(1) != 0);
+		}
 		call.ret(made.status ? 0 : made.value);
+	});
+	registry.add("NtOpenThread", 4, [&threads, &objects, handle_of](ApiCall &call) {
+		try {
+			call.process.validate_write_memory(call[0], call.pointer_width());
+			if (!call[3]) {
+				call.ret(0xc000000dU);
+				return;
+			}
+			uint32_t attributes = 0;
+			if (call[2]) {
+				const size_t width = call.pointer_width(), root_at = width == 8 ? 8 : 4;
+				if (call.load<uint32_t>(call[2]) != (width == 8 ? 48 : 24) ||
+					call.load_pointer(call[2] + root_at) || call.load_pointer(call[2] + root_at + width)) {
+					call.ret(0xc000000dU);
+					return;
+				}
+				attributes = call.load<uint32_t>(call[2] + root_at + 2 * width);
+				if (attributes & ~0x42U) {
+					call.ret(0xc00000bbU);
+					return;
+				}
+			}
+			const auto process = call.load_pointer(call[3]), id = call.load_pointer(call[3] + call.pointer_width());
+			const auto thread = id <= UINT32_MAX ? threads.find(uint32_t(id)) : nullptr;
+			if ((process && process != uint32_t(::getpid())) || !thread) {
+				call.ret(0xc000000bU);
+				return;
+			}
+			if (call.u32(1) & ~0xf21fffffU) {
+				call.ret(0xc0000022U);
+				return;
+			}
+			auto &object = (*handle_of)[thread->id];
+			if (!object)
+				object = std::make_shared<ThreadObject>(thread);
+			const auto made = objects.add_object(object);
+			if (!made.status) {
+				objects.set_access(made.value, thread_access(call.u32(1)));
+				objects.set_inherit(made.value, (attributes & 2) != 0);
+				call.store_pointer(call[0], made.value);
+			}
+			call.ret(made.status);
+		} catch (const ApiFault &) {
+			call.ret(0xc0000005U);
+		} catch (const std::runtime_error &) {
+			call.ret(0xc0000005U);
+		}
 	});
 	registry.add("QueueUserAPC", 3, [thread_from](ApiCall &call) {
 		const auto thread = thread_from(call[1]);
@@ -723,6 +933,25 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 		call.set_last_error(existed ? 183 : 0);
 		call.ret(made.value);
 	});
+	registry.add("CreateEventExW", 4, [&objects, create = registry.find("CreateEventW")->second](ApiCall &call) {
+		const auto access = event_access(call.u32(3));
+		if (!access || (call.u32(2) & ~3U)) {
+			call.fail(87);
+			return;
+		}
+		if (call[0] && call.load_pointer(call[0] + call.pointer_width())) {
+			call.fail(50);
+			return;
+		}
+		const bool inherit = inheritable_handle(call, call[0]);
+		ApiCall inner(call.process, call.environment, {call[0], call.u32(2) & 1U, call.u32(2) & 2U, call[1]});
+		create(inner);
+		if (inner.result) {
+			objects.set_access(inner.result, *access);
+			objects.set_inherit(inner.result, inherit);
+		}
+		call.ret(inner.result);
+	});
 	// Memory resource notifications are manual-reset events that the system sets while memory is low or high. Memory here is never short,
 	// so the high-memory one is set and the low-memory one never is.
 	registry.add("CreateMemoryResourceNotification", 1, [&objects](ApiCall &call) {
@@ -852,14 +1081,9 @@ void register_thread_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(6);
 			return;
 		}
-		if (mutex->state->owner.load() != mutex->me(threads.current_id()) || mutex->state->recursion.load() <= 0) {
+		if (!mutex->release(threads.current_id())) {
 			call.fail(288);
 			return;
-		}
-		if (--mutex->state->recursion == 0) {
-			mutex->state->owner = 0;
-			if (mutex->shared)
-				announce_shared_change();
 		}
 		call.ret(1);
 	});

@@ -1,6 +1,7 @@
 #include "windows.h"
 #include <unistd.h>
 #include "nt/system_exports.h"
+#include "nt/child_process.h"
 #include "nt/text.h"
 
 #include <algorithm>
@@ -539,6 +540,14 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 		}
 	});
 	registry.add("GetForegroundWindow", 0, [this](ApiCall &call) { call.ret(active); });
+	// Native windows do not impose a foreground lock; every live runtime process can activate its own windows.
+	registry.add("AllowSetForegroundWindow", 1, [](ApiCall &call) {
+		if (call.u32(0) != UINT32_MAX && !runtime_process_alive(pid_t(call.u32(0)))) {
+			call.fail(87);
+			return;
+		}
+		call.ret(1);
+	});
 	registry.add("SetForegroundWindow", 1, [this](ApiCall &call) {
 		if (!objects.window(call[0])) {
 			call.fail(1400);
@@ -1022,6 +1031,35 @@ void NativeWindows::register_manager_api(ApiRegistry &registry)
 	};
 	registry.add("EnumDisplaySettingsW", 3, [=](ApiCall &call) { display_mode(call, 1, 0, 2); });
 	registry.add("EnumDisplaySettingsExW", 4, [=](ApiCall &call) { display_mode(call, 1, 0, 2); });
+	// DEVMODEA holds its two names as 32 bytes each instead of 32 characters, so every later field sits 32, then 64 bytes earlier.
+	const auto display_mode_ansi = [this](ApiCall &call) {
+		const auto &metrics = objects.nonclient_metrics();
+		const int32_t mode = call.i32(1);
+		if ((call[0] && call.narrow(call[0], 32) != "\\\\.\\DISPLAY1") || mode > 0 || mode < -2) {
+			call.fail(0);
+			return;
+		}
+		const uint32_t size = call.load<uint16_t>(call[2] + 36);
+		if (size < 124) {
+			call.fail(87);
+			return;
+		}
+		std::vector<uint8_t> bytes(size, 0);
+		const std::string device = "\\\\.\\DISPLAY1";
+		std::memcpy(bytes.data(), device.data(), device.size());
+		const auto put = [&](size_t at, uint64_t value, size_t width) { for (size_t byte = 0; byte < width; ++byte) bytes[at + byte] = uint8_t(value >> (byte * 8)); };
+		put(34, 0x0401, 2);
+		put(36, size, 2);
+		put(40, 0x20 | 0x80 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000, 4);
+		put(104, 32, 4);
+		put(108, uint32_t(metrics.screen_x), 4);
+		put(112, uint32_t(metrics.screen_y), 4);
+		put(120, 60, 4);
+		call.write(call[2], bytes);
+		call.ret(1);
+	};
+	registry.add("EnumDisplaySettingsA", 3, [=](ApiCall &call) { display_mode_ansi(call); });
+	registry.add("EnumDisplaySettingsExA", 4, [=](ApiCall &call) { display_mode_ansi(call); });
 	// There is no kernel graphics subsystem behind the host's display: the adapter thunks report that the request is not supported, and
 	// programs that probe them (to size video memory, for instance) fall back to what the graphics API reports.
 	for (const auto *thunk : {"D3DKMTOpenAdapterFromLuid", "D3DKMTOpenAdapterFromGdiDisplayName", "D3DKMTOpenAdapterFromHdc", "D3DKMTCloseAdapter",

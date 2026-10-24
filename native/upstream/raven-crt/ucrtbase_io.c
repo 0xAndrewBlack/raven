@@ -48,7 +48,9 @@ static HANDLE open_file(const wchar_t *path, int flags, int *text)
 		disposition = TRUNCATE_EXISTING;
 	HANDLE handle = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, disposition, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (handle == INVALID_HANDLE_VALUE) {
-		set_errno(GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND ? 2 : GetLastError() == ERROR_FILE_EXISTS ? 17 : 13);
+		DWORD error = GetLastError();
+		*__doserrno() = error;
+		set_errno(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? 2 : error == ERROR_FILE_EXISTS ? 17 : 13);
 		return INVALID_HANDLE_VALUE;
 	}
 	if (flags & 8)

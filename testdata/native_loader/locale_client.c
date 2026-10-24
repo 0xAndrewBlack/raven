@@ -10,6 +10,15 @@ static int same(const WCHAR *left, const WCHAR *right)
 	return *left == *right;
 }
 
+static unsigned enumerated;
+static BOOL CALLBACK locale_found(LPWSTR name, DWORD flags, LPARAM parameter)
+{
+	if (!same(name, L"en-US") || flags != (LOCALE_WINDOWS | LOCALE_SPECIFICDATA) || parameter != (LPARAM)&enumerated)
+		enumerated = 100;
+	++enumerated;
+	return FALSE;
+}
+
 int raven_entry(void)
 {
 	WCHAR text[64];
@@ -38,5 +47,24 @@ int raven_entry(void)
 		if (GetLocaleInfoEx(NULL, LOCALE_SCURRENCY, text, 64) != 2 || !same(text, L"$") || text[5] != 0x1234)
 			return 9;
 	}
+	if (!EnumSystemLocalesEx(locale_found, LOCALE_ALL, (LPARAM)&enumerated, NULL) || enumerated != 1)
+		return 10;
+	if (!EnumSystemLocalesEx(locale_found, LOCALE_WINDOWS | LOCALE_SPECIFICDATA, (LPARAM)&enumerated, NULL) || enumerated != 2)
+		return 11;
+	if (!EnumSystemLocalesEx(locale_found, LOCALE_SUPPLEMENTAL, (LPARAM)&enumerated, NULL) || enumerated != 2)
+		return 12;
+	if (!EnumSystemLocalesEx(locale_found, LOCALE_NEUTRALDATA, (LPARAM)&enumerated, NULL) || enumerated != 2)
+		return 13;
+	SetLastError(0);
+	if (EnumSystemLocalesEx(NULL, 0, 0, NULL) || GetLastError() != ERROR_INVALID_PARAMETER)
+		return 14;
+	SetLastError(0);
+	if (EnumSystemLocalesEx(locale_found, 0, 0, &enumerated) || GetLastError() != ERROR_INVALID_PARAMETER)
+		return 15;
+	SetLastError(0);
+	if (EnumSystemLocalesEx(locale_found, 0x80000000, 0, NULL) || GetLastError() != ERROR_INVALID_FLAGS || enumerated != 2)
+		return 16;
+	if (!IsValidLocaleName(L"en-US") || !IsValidLocaleName(L"EN-us") || IsValidLocaleName(L"invalid-locale") || IsValidLocaleName(L"en-US-extra"))
+		return 17;
 	return 0;
 }

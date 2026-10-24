@@ -383,6 +383,40 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.write(call[0], header);
 		call.ret(1);
 	});
+	registry.add("AddMandatoryAce", 5, [](ApiCall &call) {
+		if (call.u32(1) != 2 && call.u32(1) != 4) { call.fail(1306); return; }
+		if ((call.u32(2) & ~0x1fU) || (call.u32(3) & ~7U)) { call.fail(87); return; }
+		if (!valid_sid(call, call[4])) { call.fail(1337); return; }
+		const auto sid = call.read(call[4], sid_length(call, call[4]));
+		if (sid[1] != 1 || sid[2] || sid[3] || sid[4] || sid[5] || sid[6] || sid[7] != 16) { call.fail(1337); return; }
+		const auto header = call.read(call[0], acl_header);
+		uint16_t size, count;
+		std::memcpy(&size, header.data() + 2, 2);
+		std::memcpy(&count, header.data() + 4, 2);
+		if (size < acl_header || (header[0] != 2 && header[0] != 4)) { call.fail(1336); return; }
+		auto acl = call.read(call[0], size);
+		size_t used = acl_header;
+		for (uint32_t index = 0; index < count; ++index) {
+			if (used + 4 > size) { call.fail(1336); return; }
+			uint16_t length;
+			std::memcpy(&length, acl.data() + used + 2, 2);
+			if (length < 4 || length % 4 || used + length > size) { call.fail(1336); return; }
+			used += length;
+		}
+		const auto length = uint16_t(8 + sid.size());
+		if (used + length > size || count == 0xffff) { call.fail(1344); return; }
+		acl[used] = 0x11;
+		acl[used + 1] = uint8_t(call.u32(2));
+		std::memcpy(acl.data() + used + 2, &length, 2);
+		const auto mask = call.u32(3);
+		std::memcpy(acl.data() + used + 4, &mask, 4);
+		std::memcpy(acl.data() + used + 8, sid.data(), sid.size());
+		++count;
+		std::memcpy(acl.data() + 4, &count, 2);
+		acl[0] = std::max(acl[0], uint8_t(call.u32(1)));
+		call.write(call[0], acl);
+		call.ret(1);
+	});
 	const auto add_ace = [](ApiCall &call, uint8_t type) {
 		if (!valid_sid(call, call[3])) {
 			call.fail(1337);
@@ -418,13 +452,21 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	};
 	// Token information: the account is one fixed user in the Users group at medium integrity, not elevated, in session 1.
-	registry.add("GetTokenInformation", 5, [&objects](ApiCall &call) {
+	registry.add("GetTokenInformation", 5, [&objects, &context](ApiCall &call) {
 		// The pseudo handles of the process token, the thread token and the thread's effective token name the program's own token.
 		const int32_t pseudo = int32_t(uint32_t(call[0]));
-		if ((pseudo < -6 || pseudo > -4) && !objects.object_as<AccessToken>(call[0])) {
-			call.fail(6);
+		const auto impersonation = context.threads.current().impersonation;
+		const auto token = pseudo == -4 ? context.process_token : pseudo == -5 ? impersonation :
+			pseudo == -6 ? (impersonation ? impersonation : context.process_token) : objects.object_as<AccessToken>(call[0]);
+		if (!token) {
+			call.fail(pseudo == -5 ? 1008 : 6);
 			return;
 		}
+		if ((pseudo < -6 || pseudo > -4) && !(objects.access_of(call[0]) & 8)) {
+			call.fail(5);
+			return;
+		}
+		const auto value = token->data();
 		const size_t width = call.pointer_width();
 		const size_t record = width == 4 ? 8 : 16;
 		std::vector<uint8_t> data;
@@ -440,11 +482,34 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		};
 		switch (call.u32(1)) {
 		case 1: with_sid(user_sid(), 0, true); break;
+		case 3: {
+			data.assign(4 + 12 * value.privileges.size(), 0);
+			const auto count = uint32_t(value.privileges.size());
+			std::memcpy(data.data(), &count, 4);
+			for (size_t index = 0; index < value.privileges.size(); ++index) {
+				std::memcpy(data.data() + 4 + 12 * index, &value.privileges[index].luid, 8);
+				std::memcpy(data.data() + 12 + 12 * index, &value.privileges[index].attributes, 4);
+			}
+			break;
+		}
 		case 4: with_sid(user_sid(), 0, false); break;
 		case 5: with_sid(make_sid(5, {21, 1000, 1000, 1000, 513}), 0, false); break;
-		case 2: {
-			// TOKEN_GROUPS: a count, then SID_AND_ATTRIBUTES entries; one group, the Users of the machine.
-			const std::vector<std::vector<uint8_t>> sids{make_sid(5, {32, 545}), make_sid(5, {32, 544}), make_sid(1, {0})};
+		case 6: {
+			data.assign(width, 0);
+			if (!value.default_dacl.empty()) {
+				const uint64_t at = call[2] + width;
+				std::memcpy(data.data(), &at, width);
+				data.insert(data.end(), value.default_dacl.begin(), value.default_dacl.end());
+			}
+			break;
+		}
+		case 2: case 28: {
+			const bool logon = call.u32(1) == 28;
+			// The logon SID identifies the same session for every process in this runtime.
+			const auto session = make_sid(5, {5, 0, 1});
+			std::vector<std::vector<uint8_t>> sids{session};
+			if (!logon)
+				sids.insert(sids.begin(), {make_sid(5, {32, 545}), make_sid(5, {32, 544}), make_sid(1, {0})});
 			const size_t first = width == 4 ? 4 : 8;
 			size_t total = first + record * sids.size();
 			for (const auto &item : sids)
@@ -456,7 +521,7 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			for (size_t index = 0; index < sids.size(); ++index) {
 				// Users and Everyone: mandatory, enabled by default and enabled. The account is an administrator under User Account
 				// Control: Administrators is enabled (and an owner) in an elevated process and held for denying access only otherwise.
-				const uint32_t attributes = index == 1 ? (process_elevated() ? 0xf : 0x10) : 7;
+				const uint32_t attributes = logon || index == 3 ? 0xc0000007U : index == 1 ? (process_elevated() ? 0xf : 0x10) : 7;
 				const uint64_t at = call[2] + placed;
 				std::memcpy(data.data() + first + index * record, &at, width);
 				std::memcpy(data.data() + first + index * record + width, &attributes, 4);
@@ -465,14 +530,17 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			}
 			break;
 		}
-		case 8: data = {1, 0, 0, 0}; break;
-		case 9: data = {0, 0, 0, 0}; break;
+		case 8: data = {uint8_t(value.type), 0, 0, 0}; break;
+		case 9:
+			if (value.type != 2) { call.fail(87); return; }
+			data = {uint8_t(value.impersonation_level), 0, 0, 0};
+			break;
 		case 12: data = {1, 0, 0, 0}; break;
 		// TokenElevationType: full for an elevated process, limited (the filtered token of an administrator) otherwise; TokenElevation.
 		case 18: data = {process_elevated() ? uint8_t(2) : uint8_t(3), 0, 0, 0}; break;
 		case 20: data = {process_elevated() ? uint8_t(1) : uint8_t(0), 0, 0, 0}; break;
 		case 29: data = {0, 0, 0, 0}; break;
-		case 25: with_sid(make_sid(16, {8192}), 0x60, true); break;
+		case 25: with_sid(make_sid(16, {value.integrity}), 0x60, true); break;
 		case 10: data.assign(56, 0); break;
 		default:
 			call.fail(87);
@@ -576,18 +644,30 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			call.set_last_error(5);
 		call.ret(1);
 	});
-	// A token can be copied and restricted; the copies are accounts of the same kind (the program has one identity and no enforcement
-	// of restrictions), so they answer the same queries as the original.
+	// Copies own their DACL and integrity level; changing one leaves the source token unchanged.
 	registry.add("DuplicateTokenEx", 6, [&objects](ApiCall &call) {
 		if (!objects.object_as<AccessToken>(call[0]) || !call[5]) {
 			call.fail(call[5] ? 6 : 87);
 			return;
 		}
-		const auto made = objects.add_object(std::make_shared<AccessToken>());
+		if (!(objects.access_of(call[0]) & 2)) {
+			call.fail(5);
+			return;
+		}
+		const auto access = token_access(call.u32(1));
+		if (!access || call.u32(3) > 3 || (call.u32(4) != 1 && call.u32(4) != 2)) {
+			call.fail(87);
+			return;
+		}
+		auto token = std::make_shared<AccessToken>(*objects.object_as<AccessToken>(call[0]));
+		token->set_type(call.u32(4));
+		token->set_impersonation_level(call.u32(3));
+		const auto made = objects.add_object(token);
 		if (made.status) {
 			call.fail(8);
 			return;
 		}
+		objects.set_access(made.value, call.u32(1) ? *access : objects.access_of(call[0]));
 		call.store_pointer(call[5], made.value);
 		call.ret(1);
 	});
@@ -596,30 +676,102 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			call.fail(call[2] ? 6 : 87);
 			return;
 		}
-		const auto made = objects.add_object(std::make_shared<AccessToken>());
+		if (!(objects.access_of(call[0]) & 2)) {
+			call.fail(5);
+			return;
+		}
+		if (call.u32(1) > 3) { call.fail(87); return; }
+		auto token = std::make_shared<AccessToken>(*objects.object_as<AccessToken>(call[0]));
+		token->set_type(2);
+		token->set_impersonation_level(call.u32(1));
+		const auto made = objects.add_object(token);
 		if (made.status) {
 			call.fail(8);
 			return;
 		}
+		objects.set_access(made.value, objects.access_of(call[0]));
 		call.store_pointer(call[2], made.value);
 		call.ret(1);
 	});
 	registry.add("CreateRestrictedToken", 9, [&objects](ApiCall &call) {
-		if (!objects.object_as<AccessToken>(call[0]) || !call[8]) {
+		const auto source = objects.object_as<AccessToken>(call[0]);
+		if (!source || !call[8]) {
 			call.fail(call[8] ? 6 : 87);
 			return;
 		}
-		const auto made = objects.add_object(std::make_shared<AccessToken>());
+		if (!(objects.access_of(call[0]) & 2)) { call.fail(5); return; }
+		if (call.u32(1) & ~0xfU) { call.fail(87); return; }
+		call.write(call[8], call.read(call[8], call.pointer_width()));
+		std::vector<uint64_t> removed;
+		if (!(call.u32(1) & 1)) {
+			const auto count = call.u32(4);
+			if (count > 64 || (count && !call[5])) { call.fail(87); return; }
+			const auto entries = call.read(call[5], size_t(count) * 12);
+			for (uint32_t index = 0; index < count; ++index) {
+				uint64_t luid;
+				std::memcpy(&luid, entries.data() + 12 * index, 8);
+				removed.push_back(luid);
+			}
+		}
+		auto token = std::make_shared<AccessToken>(*source);
+		token->restrict_privileges(call.u32(1) & 1, removed);
+		const auto made = objects.add_object(token);
 		if (made.status) {
 			call.fail(8);
 			return;
 		}
+		objects.set_access(made.value, objects.access_of(call[0]));
 		call.store_pointer(call[8], made.value);
 		call.ret(1);
 	});
 	registry.add("SetTokenInformation", 4, [&objects](ApiCall &call) {
-		if (!objects.object_as<AccessToken>(call[0])) {
+		const auto token = objects.object_as<AccessToken>(call[0]);
+		if (!token) {
 			call.fail(6);
+			return;
+		}
+		if (!(objects.access_of(call[0]) & 0x80)) {
+			call.fail(5);
+			return;
+		}
+		if (!call[2] || call.u32(3) < call.pointer_width()) {
+			call.fail(87);
+			return;
+		}
+		const uint64_t at = call.load_pointer(call[2]);
+		if (call.u32(1) == 6) {
+			std::vector<uint8_t> acl;
+			if (at) {
+				const auto size = call.load<uint16_t>(at + 2), count = call.load<uint16_t>(at + 4);
+				const auto revision = call.load<uint8_t>(at);
+				if (size < acl_header || (revision != 2 && revision != 4)) {
+					call.fail(1336);
+					return;
+				}
+				acl = call.read(at, size);
+				size_t used = acl_header;
+				for (uint16_t index = 0; index < count; ++index) {
+					uint16_t entry = 0;
+					if (used + 4 <= acl.size())
+						std::memcpy(&entry, acl.data() + used + 2, 2);
+					if (entry < 4 || used + entry > acl.size()) {
+						call.fail(1336);
+						return;
+					}
+					used += entry;
+				}
+			}
+			token->set_default_dacl(acl);
+		} else if (call.u32(1) == 25) {
+			const auto authority = make_sid(16, {0});
+			if (call.u32(3) < (call.pointer_width() == 4 ? 8 : 16) || !valid_sid(call, at) ||
+				call.read(at, 8) != std::vector<uint8_t>(authority.begin(), authority.begin() + 8)) {
+				call.fail(1337);
+				return;
+			}
+			token->set_integrity(call.load<uint32_t>(at + 8));
+		} else {
+			call.fail(87);
 			return;
 		}
 		call.ret(1);
@@ -1189,16 +1341,26 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 		// An existing list keeps its entries first.
 		if (call[2]) {
 			const auto header = call.read(call[2], 8);
-			uint16_t old_count;
+			uint16_t old_count, capacity;
+			std::memcpy(&capacity, header.data() + 2, 2);
 			std::memcpy(&old_count, header.data() + 4, 2);
+			if (capacity < acl_header || (header[0] != 2 && header[0] != 4)) {
+				call.ret(1336);
+				return;
+			}
+			const auto old = call.read(call[2], capacity);
 			uint32_t used = 8;
 			for (uint16_t index = 0; index < old_count; ++index) {
-				uint16_t size;
-				std::memcpy(&size, call.read(call[2] + used + 2, 2).data(), 2);
+				uint16_t size = 0;
+				if (used + 4 <= old.size())
+					std::memcpy(&size, old.data() + used + 2, 2);
+				if (size < 4 || used + size > old.size()) {
+					call.ret(1336);
+					return;
+				}
 				used += size;
 			}
-			const auto old = call.read(call[2] + 8, used - 8);
-			acl.insert(acl.end(), old.begin(), old.end());
+			acl.insert(acl.end(), old.begin() + acl_header, old.begin() + used);
 			entries = old_count;
 		}
 		for (uint32_t index = 0; index < count; ++index) {
@@ -1215,9 +1377,27 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 				call.ret(1332);
 				return;
 			}
-			if (mode != 1 && mode != 2 && mode != 3) {
+			if (mode < 1 || mode > 4) {
 				call.ret(87);
 				return;
+			}
+			if (mode == 4) {
+				for (size_t offset = acl_header; offset + 4 <= acl.size();) {
+					uint16_t size;
+					std::memcpy(&size, acl.data() + offset + 2, 2);
+					if (size < 4 || offset + size > acl.size()) {
+						call.ret(1336);
+						return;
+					}
+					if (acl[offset] <= 1 && size == 8 + sid.size() &&
+						std::equal(sid.begin(), sid.end(), acl.begin() + offset + 8)) {
+						acl.erase(acl.begin() + offset, acl.begin() + offset + size);
+						--entries;
+					} else {
+						offset += size;
+					}
+				}
+				continue;
 			}
 			const uint16_t size = uint16_t(8 + sid.size());
 			std::vector<uint8_t> entry(size);
@@ -1228,6 +1408,10 @@ void register_security_api(ApiRegistry &registry, KernelContext &context)
 			std::memcpy(entry.data() + 8, sid.data(), sid.size());
 			acl.insert(acl.end(), entry.begin(), entry.end());
 			++entries;
+		}
+		if (acl.size() > UINT16_MAX) {
+			call.ret(1344);
+			return;
 		}
 		const uint16_t total = uint16_t(acl.size());
 		std::memcpy(acl.data() + 2, &total, 2);

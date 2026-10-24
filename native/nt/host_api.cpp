@@ -538,6 +538,53 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 	// Device enumeration finds nothing: the set opens, holds no interfaces and closes.
+	// The setup classes Windows installs and their GUIDs; a name resolves to its class, compared without regard to case.
+	static const std::pair<std::u16string_view, std::array<uint8_t, 16>> setup_classes[] = {
+		{u"DiskDrive", {0x67, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"Display", {0x68, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"Keyboard", {0x6b, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"Media", {0x6c, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"Monitor", {0x6e, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"Mouse", {0x6f, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"Net", {0x72, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"Ports", {0x78, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"System", {0x7d, 0xe9, 0x36, 0x4d, 0x25, 0xe3, 0xce, 0x11, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}},
+		{u"HIDClass", {0xa0, 0x17, 0x5a, 0x74, 0xd3, 0x74, 0xd0, 0x11, 0xb6, 0xfe, 0x00, 0xa0, 0xc9, 0x0f, 0x57, 0xda}},
+		{u"USB", {0x60, 0x9e, 0xfc, 0x36, 0x65, 0xc4, 0xcf, 0x11, 0x80, 0x56, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00}},
+		{u"Processor", {0xc3, 0x7d, 0x12, 0x50, 0x36, 0x0f, 0x5e, 0x41, 0xa6, 0xcc, 0x4c, 0xb3, 0xbe, 0x91, 0x0b, 0x65}},
+		{u"AudioEndpoint", {0x18, 0xe1, 0xfc, 0xc1, 0xdf, 0xa7, 0x7a, 0x4a, 0xb9, 0xe5, 0x2e, 0x7c, 0x76, 0x4e, 0x8b, 0x52}},
+	};
+	// SetupDiClassGuidsFromName[Ex](name, list, size, required[, machine, reserved]): the GUIDs of the classes with that name.
+	const auto class_guids = [](ApiCall &call, bool ansi) {
+		if (!call[0] || !call[3]) {
+			call.fail(87, 0);
+			return;
+		}
+		const auto name = ansi ? [&] { const auto text = call.narrow(call[0], 64); return std::u16string(text.begin(), text.end()); }() : call.wide(call[0], 64);
+		const auto fold = [](std::u16string_view text) {
+			std::u16string lower(text);
+			for (auto &c : lower)
+				if (c >= u'A' && c <= u'Z')
+					c = char16_t(c + 32);
+			return lower;
+		};
+		std::vector<const std::array<uint8_t, 16> *> found;
+		for (const auto &[class_name, guid] : setup_classes)
+			if (fold(class_name) == fold(name))
+				found.push_back(&guid);
+		call.store<uint32_t>(call[3], uint32_t(found.size()));
+		if (found.size() > call.u32(2)) {
+			call.fail(122, 0);
+			return;
+		}
+		for (size_t index = 0; index < found.size(); ++index)
+			call.write(call[1] + index * 16, std::vector<uint8_t>(found[index]->begin(), found[index]->end()));
+		call.ret(1);
+	};
+	registry.add("SetupDiClassGuidsFromNameW", 4, [class_guids](ApiCall &call) { class_guids(call, false); });
+	registry.add("SetupDiClassGuidsFromNameA", 4, [class_guids](ApiCall &call) { class_guids(call, true); });
+	registry.add("SetupDiClassGuidsFromNameExW", 6, [class_guids](ApiCall &call) { class_guids(call, false); });
+	registry.add("SetupDiClassGuidsFromNameExA", 6, [class_guids](ApiCall &call) { class_guids(call, true); });
 	registry.add("SetupDiGetClassDevsW", 4, [&objects](ApiCall &call) {
 		const auto made = objects.add_object(std::make_shared<DeviceInfoSet>());
 		if (made.status) {
@@ -545,6 +592,39 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			return;
 		}
 		call.ret(made.value);
+	});
+	// The device sets here are empty: enumerating their devices ends at once, and every interface list holds only its terminator.
+	registry.add("SetupDiEnumDeviceInfo", 3, [&objects](ApiCall &call) {
+		if (!objects.object_as<DeviceInfoSet>(call[0])) {
+			call.fail(6, 0);
+			return;
+		}
+		call.fail(error_no_more_items, 0);
+	});
+	for (const char *name : {"CM_Get_Device_Interface_List_SizeW", "CM_Get_Device_Interface_List_SizeA"})
+		registry.add(name, 4, [](ApiCall &call) {
+			if (!call[0]) {
+				call.ret(3);
+				return;
+			}
+			call.store<uint32_t>(call[0], 1);
+			call.ret(0);
+		});
+	registry.add("CM_Get_Device_Interface_ListW", 5, [](ApiCall &call) {
+		if (!call[2] || !call.u32(3)) {
+			call.ret(3);
+			return;
+		}
+		call.store<uint16_t>(call[2], 0);
+		call.ret(0);
+	});
+	registry.add("CM_Get_Device_Interface_ListA", 5, [](ApiCall &call) {
+		if (!call[2] || !call.u32(3)) {
+			call.ret(3);
+			return;
+		}
+		call.store<uint8_t>(call[2], 0);
+		call.ret(0);
 	});
 	registry.add("SetupDiEnumDeviceInterfaces", 5, [&objects](ApiCall &call) {
 		if (!objects.object_as<DeviceInfoSet>(call[0])) {
@@ -623,12 +703,13 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 	});
 	// What the thread's queue holds: the high word the kinds of message waiting, the low word the ones that arrived since the last call.
 	registry.add("GetQueueStatus", 1, [&context](ApiCall &call) {
-		const uint32_t kinds = call.u32(0) & 0x4ff;
-		call.ret(context.message_ready && context.message_ready(context.threads.current_id()) ? uint64_t(kinds) << 16 | kinds : 0);
+		const uint32_t kinds = call.u32(0);
+		if (kinds & ~0x1dffU) { call.fail(87, 0); return; }
+		call.ret(context.queue_status ? context.queue_status(context.threads.current_id(), kinds, true) : 0);
 	});
-	// Whether input waits in the thread's queue: the queue tells whether any message waits, which is what the callers look at it for.
+	// Only keyboard and mouse-button input counts here, not posted messages, motion, timers or paint.
 	registry.add("GetInputState", 0, [&context](ApiCall &call) {
-		call.ret(context.message_ready && context.message_ready(context.threads.current_id()) ? 1 : 0);
+		call.ret(context.queue_status && (context.queue_status(context.threads.current_id(), 5, false) >> 16) ? 1 : 0);
 	});
 	// Whether the message being handled was sent from another thread that waits for the reply: the window procedures of a program run
 	// on the thread that sent to them, so the answer is no (ISMEX_NOSEND).
@@ -789,19 +870,21 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 			}
 			call.ret(result.size());
 		});
-	registry.add("GetLogicalDriveStringsW", 2, [drives](ApiCall &call) {
-		std::u16string text;
-		const uint32_t mask = drives();
-		for (char16_t letter = u'A'; letter <= u'Z'; ++letter)
-			if (mask & (1u << (letter - u'A')))
-				text += std::u16string{letter, u':', u'\\', 0};
-		if (call.u32(0) <= text.size()) {
-			call.ret(text.size() + 1);
-			return;
-		}
-		call.put_wide(call[1], text, text.size() + 1);
-		call.ret(text.size());
-	});
+	for (const bool wide : {true, false})
+		registry.add(wide ? "GetLogicalDriveStringsW" : "GetLogicalDriveStringsA", 2, [drives, wide](ApiCall &call) {
+			std::u16string text;
+			const uint32_t mask = drives();
+			for (char16_t letter = u'A'; letter <= u'Z'; ++letter)
+				if (mask & (1u << (letter - u'A')))
+					text += std::u16string{letter, u':', u'\\', 0};
+			if (call.u32(0) <= text.size()) {
+				call.ret(text.size() + 1);
+				return;
+			}
+			if (wide) call.put_wide(call[1], text, text.size() + 1);
+			else call.put_narrow(call[1], to_utf8(text), text.size() + 1);
+			call.ret(text.size());
+		});
 	// A drive's volume: the prefix keeps the files, so every drive reports one NTFS volume.
 	registry.add("GetVolumeInformationW", 8, [&context](ApiCall &call) {
 		if (call[0]) {
@@ -913,9 +996,14 @@ void register_host_api(ApiRegistry &registry, KernelContext &context)
 		call.store<uint32_t>(call[1], 1);
 		call.ret(1);
 	});
-	// Library search paths are not restricted by anything Raven resolves, so the request is accepted as it stands.
-	registry.add("SetDllDirectoryW", 1, [](ApiCall &call) { call.ret(1); });
-	registry.add("SetDllDirectoryA", 1, [](ApiCall &call) { call.ret(1); });
+	const auto set_dll_directory = [&context](ApiCall &call, bool wide) {
+		std::optional<std::u16string> path;
+		if (call[0]) path = wide ? call.wide(call[0]) : from_ansi(call.narrow(call[0]), context.launch.ansi_code_page);
+		if (!context.paths.set_dll_directory(std::move(path))) { call.fail(123); return; }
+		call.ret(1);
+	};
+	registry.add("SetDllDirectoryW", 1, [set_dll_directory](ApiCall &call) { set_dll_directory(call, true); });
+	registry.add("SetDllDirectoryA", 1, [set_dll_directory](ApiCall &call) { set_dll_directory(call, false); });
 	// A program without a console window has no title to set.
 	registry.add("SetConsoleTitleW", 1, [](ApiCall &call) { call.ret(1); });
 	registry.add("SetConsoleTitleA", 1, [](ApiCall &call) { call.ret(1); });

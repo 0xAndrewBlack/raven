@@ -17,7 +17,7 @@
 
 namespace raven {
 
-// Base of the kernel objects that are not events: files, searches, mappings, threads and the like.
+// Base of the objects held by the kernel handle table.
 class KernelObject {
 public:
 	virtual ~KernelObject() = default;
@@ -41,6 +41,7 @@ public:
 };
 
 class NativeObjects;
+class EventObject;
 // Rebuilds the handles a creator passed on, each under the value it had there.
 void adopt_inherited(NativeObjects &objects, const std::vector<InheritedHandle> &handles);
 // The object a handle description stands for, built around its descriptor; null for a kind that cannot be handed over.
@@ -104,6 +105,8 @@ public:
 	std::vector<uint64_t> inheritable() const;
 	// Puts an object under a handle value that another process chose; false when the value is taken.
 	bool adopt(uint64_t handle, std::shared_ptr<KernelObject> object, bool inherit);
+	// Process requests share the handle channel, but the process owner validates and serves them.
+	std::function<InheritedHandle(const InheritedHandle &)> process_request;
 	NativeObjectResult set_event(uint64_t handle, bool signaled);
 	NativeObjectResult query_event(uint64_t handle);
 	// The object manager type of the object behind a handle; nullopt when the handle does not exist.
@@ -111,34 +114,26 @@ public:
 	NativeObjectResult wait(uint64_t handle, std::optional<int64_t> timeout,
 		std::chrono::steady_clock::time_point deadline);
 	size_t count() const;
+	std::vector<uint64_t> values() const;
 	size_t waiting(uint64_t handle) const;
 
 private:
-	struct Event {
-		struct Waiter { bool ready = false; };
-		std::mutex mutex;
-		std::condition_variable changed;
-		uint32_t type;
-		bool signaled;
-		std::deque<std::shared_ptr<Waiter>> waiters;
-		Event(uint32_t type, bool signaled) : type(type), signaled(signaled) {}
-	};
 	struct File {
 		int descriptor;
 		uint32_t type;
 		File(int descriptor,uint32_t type) : descriptor(descriptor),type(type) {}
 		~File();
 	};
-	struct Handle { std::shared_ptr<Event> event; uint32_t access; std::shared_ptr<File> file; std::shared_ptr<KernelObject> generic = {}; bool inherit = false; };
+	struct Handle { std::shared_ptr<EventObject> event; uint32_t access; std::shared_ptr<File> file; std::shared_ptr<KernelObject> generic = {}; bool inherit = false; };
 	mutable std::mutex mutex;
 	std::map<uint64_t,Handle> handles;
-	std::map<std::u16string,std::weak_ptr<Event>> named_events;
+	std::map<std::u16string,std::weak_ptr<EventObject>> named_events;
 	uint64_t next = 0x100;
 	// The next free handle value; the caller holds the mutex. Values that inherited handles occupy are skipped.
 	uint64_t take();
 	void arrive(uint64_t handle) const;
 	size_t limit;
-	std::pair<std::shared_ptr<Event>,uint32_t> event(uint64_t handle, uint32_t access) const;
+	std::pair<std::shared_ptr<EventObject>,uint32_t> event(uint64_t handle, uint32_t access) const;
 	std::shared_ptr<File> file(uint64_t handle) const;
 };
 

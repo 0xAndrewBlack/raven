@@ -1,11 +1,14 @@
 #include "object_api.h"
 #include "providers.h"
+#include "event.h"
+#include "mutex.h"
 
 #include <future>
 #include <iostream>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 
 static void check(bool condition, const char *message)
 {
@@ -23,6 +26,41 @@ int main(int argc, char **argv)
 {
 	try {
 		check(argc==2,"bootstrap required");
+		{
+			auto event = std::make_shared<raven::EventObject>(1, true);
+			raven::InheritedHandle record;
+			check(event->describe(record) && record.kind == "event", "event descriptor transfer failed");
+			record.descriptor = ::dup(record.descriptor);
+			auto imported = raven::object_from_record(record);
+			check(imported && imported->try_consume(1) && !event->try_consume(1), "event transfer copied its signaled state");
+			for (unsigned index = 0; index < 100; ++index) {
+				event->set_state(true);
+				auto first = std::async(std::launch::async, [&] { return event->try_consume(1); });
+				auto second = std::async(std::launch::async, [&] { return imported->try_consume(2); });
+				check(unsigned(first.get()) + unsigned(second.get()) == 1, "shared auto-reset event had multiple consumers");
+			}
+			event.reset();
+			check(imported->set_state(true) == 0 && imported->try_consume(1), "event died with the exporting owner");
+			raven::NativeObjects receiver;
+			record.handle = 0x1000;
+			check(imported->describe(record), "event retransmission failed");
+			record.descriptor = ::dup(record.descriptor);
+			raven::adopt_inherited(receiver, {record});
+			check(!receiver.access_of(record.handle) && receiver.set_event(record.handle,true).status == 0xc0000022U &&
+				receiver.query_event(record.handle).status == 0xc0000022U && receiver.signaled(record.handle,1) == -3,
+				"event transfer granted rights to a zero-access handle");
+		}
+		{
+			auto mutex = std::make_shared<raven::MutexObject>();
+			raven::InheritedHandle record;
+			check(mutex->try_consume(7) && mutex->try_consume(7) && mutex->describe(record), "owned mutex transfer failed");
+			record.descriptor = ::dup(record.descriptor);
+			auto imported = std::dynamic_pointer_cast<raven::MutexObject>(raven::object_from_record(record));
+			check(imported && !imported->try_consume(8) && !imported->release(8) && mutex->release(7) &&
+				!imported->try_consume(8) && imported->release(7) && imported->try_consume(8), "mutex transfer lost ownership or recursion");
+			mutex.reset();
+			check(imported->release(8), "mutex died with exporting handle");
+		}
 		raven::NativeObjects objects;
 		const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(4);
 		const auto manual=objects.create_event(0x1f0003,0,false), automatic=objects.create_event(0x1f0003,1,true);

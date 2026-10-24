@@ -652,6 +652,9 @@ void NativeWindows::register_ext_api(ApiRegistry &registry)
 		// ToUnicode takes a wide buffer and a count; reuse the translation with a two-byte store.
 		to_unicode(call, true);
 	});
+	// The Ex forms add the keyboard layout to translate with; the only layout here is the one the plain forms use.
+	registry.add("ToUnicodeEx", 7, [=](ApiCall &call) { to_unicode(call, true); });
+	registry.add("ToAsciiEx", 6, [=](ApiCall &call) { to_unicode(call, false); });
 
 	// ---- tracking and hooks ----
 	registry.add("TrackMouseEvent", 1, [this](ApiCall &call) {

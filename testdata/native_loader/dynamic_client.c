@@ -33,8 +33,13 @@ DWORD raven_entry(void)
 	SetLastError(99);
 	if (GetModuleHandleA("tlsprobe.dll"))
 		return 1;
+	volatile unsigned char *reserved = VirtualAlloc((void *)0x190000000ULL, 65536, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+	if (reserved != (void *)0x190000000ULL)
+		return 16;
+	reserved[0] = 0x5a;
+	reserved[65535] = 0xa5;
 	HMODULE first = LoadLibraryA("TLSPROBE");
-	if (!first || !listed(first, TRUE))
+	if (!first || (void *)first == (void *)reserved || !listed(first, TRUE))
 		return 2;
 	read_fn read = (read_fn)GetProcAddress(first, "ReadTLSValue");
 	write_fn write = (write_fn)GetProcAddress(first, "WriteTLSValue");
@@ -54,6 +59,13 @@ DWORD raven_entry(void)
 	read = (read_fn)GetProcAddress(first, "ReadTLSValue");
 	if (!read || read() != 19 || !FreeLibrary(first))
 		return 8;
+	first = LoadLibraryExW(L"tlsprobe.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
+	if (!first || ((uintptr_t)first & ~(uintptr_t)3) == (uintptr_t)reserved || !FreeLibrary(first))
+		return 17;
+	MEMORY_BASIC_INFORMATION info;
+	if (reserved[0] != 0x5a || reserved[65535] != 0xa5 || VirtualQuery((void *)reserved, &info, sizeof(info)) != sizeof(info) ||
+		info.State != MEM_COMMIT || info.Type != MEM_PRIVATE || !VirtualFree((void *)reserved, 0, MEM_RELEASE))
+		return 18;
 	HMODULE parent = LoadLibraryA("parent.dll");
 	if (!parent)
 		return 9;

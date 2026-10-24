@@ -89,6 +89,12 @@ int raven_entry(void)
 	SetFocus(other);
 	if (GetFocus() != other)
 		return 18;
+	if (!AllowSetForegroundWindow(GetCurrentProcessId()) || !SetForegroundWindow(window) || GetForegroundWindow() != window ||
+		!AllowSetForegroundWindow(ASFW_ANY))
+		return 40;
+	SetLastError(0);
+	if (AllowSetForegroundWindow(0) || GetLastError() != ERROR_INVALID_PARAMETER || GetForegroundWindow() != window)
+		return 41;
 	if (GetDpiForWindow(window) != 96)
 		return 19;
 	/* The message loop's helpers on messages they leave alone. */

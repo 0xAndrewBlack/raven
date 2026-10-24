@@ -1,5 +1,7 @@
 #include "handle_channel.h"
 
+#include "child_process.h"
+#include "host_names.h"
 #include "objects.h"
 #include "threads.h"
 
@@ -11,6 +13,7 @@
 #include <vector>
 
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace raven {
@@ -23,8 +26,79 @@ HandleChannel *parent = nullptr;
 
 // Frames that are not a handle sent over: a request names the value it wants in `handle` and its number in `size`; an answer carries
 // the request number in `handle` and the kind of the object after this prefix, nothing after it when there is no such handle.
-const std::string request_kind = "request", answer_prefix = "answer:";
+const std::string request_kind = "request", answer_prefix = "answer:", transfer_prefix = "transfer:";
 
+struct ProcessChannels {
+	int listener = -1;
+	std::vector<std::shared_ptr<HandleChannel>> accepted;
+	std::map<pid_t, std::shared_ptr<HandleChannel>> outgoing;
+	~ProcessChannels() { if (listener >= 0) ::close(listener); }
+};
+
+ProcessChannels process_channels;
+
+sockaddr_un process_address(pid_t pid, socklen_t &length)
+{
+	sockaddr_un address{};
+	address.sun_family = AF_UNIX;
+	const auto name = "raven-process-" + prefix_tag() + "-" + std::to_string(pid);
+	std::memcpy(address.sun_path + 1, name.data(), name.size());
+	length = socklen_t(offsetof(sockaddr_un, sun_path) + 1 + name.size());
+	return address;
+}
+
+bool process_peer(int descriptor, pid_t expected = 0)
+{
+	ucred peer{};
+	socklen_t length = sizeof(peer);
+	return !::getsockopt(descriptor, SOL_SOCKET, SO_PEERCRED, &peer, &length) && peer.uid == ::geteuid() &&
+		peer.pid > 0 && (!expected || peer.pid == expected) && runtime_process_alive(peer.pid);
+}
+
+}
+
+void enable_process_requests()
+{
+	if (process_channels.listener >= 0)
+		return;
+	const int descriptor = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (descriptor < 0)
+		return;
+	socklen_t length;
+	const auto address = process_address(::getpid(), length);
+	if (::bind(descriptor, reinterpret_cast<const sockaddr *>(&address), length) || ::listen(descriptor, 64)) {
+		::close(descriptor);
+		return;
+	}
+	process_channels.listener = descriptor;
+}
+
+std::shared_ptr<HandleChannel> process_request_channel(pid_t pid)
+{
+	if (!runtime_process_alive(pid))
+		return nullptr;
+	auto &channel = process_channels.outgoing[pid];
+	if (channel && channel->connected())
+		return channel;
+	channel.reset();
+	const int descriptor = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (descriptor < 0)
+		return nullptr;
+	socklen_t length;
+	const auto address = process_address(pid, length);
+	if (::connect(descriptor, reinterpret_cast<const sockaddr *>(&address), length) || !process_peer(descriptor, pid)) {
+		::close(descriptor);
+		return nullptr;
+	}
+	channel = std::make_shared<HandleChannel>(descriptor, true);
+	return channel;
+}
+
+bool HandleChannel::connected() const
+{
+	uint8_t byte;
+	const auto count = ::recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+	return count > 0 || (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR));
 }
 
 HandleChannel::~HandleChannel()
@@ -57,33 +131,61 @@ bool HandleChannel::send_frame(const InheritedHandle &record, int shared)
 	return sent == ssize_t(bytes.size());
 }
 
-uint64_t HandleChannel::send(InheritedHandle record, uint32_t inherit)
+NativeObjectResult HandleChannel::send(NativeObjects &objects, NativeThreads &threads, InheritedHandle record, uint32_t inherit)
 {
+	if (process_only)
+		return {0, 0xc00000bbU};
 	const int shared = record.descriptor;
 	if (shared < 0)
-		return 0;
-	const uint64_t value = next;
-	next += 4;
-	record.handle = value;
+		return {0, 0xc0000008U};
+	// Exchange uses size for its request number; keep the object's size in the unused source-handle word.
+	record.handle = record.size;
+	record.kind = transfer_prefix + record.kind;
 	record.descriptor = -1;
 	if (inherit)
 		record.bits |= 0x80000000U;
-	return send_frame(record, shared) ? value : 0;
+	const auto answer = exchange(objects, threads, std::move(record), shared);
+	if (!answer || answer->kind != "transfer") return {0, 0xc0000001U};
+	return {answer->size, answer->access};
 }
 
 std::shared_ptr<KernelObject> HandleChannel::fetch(NativeObjects &objects, NativeThreads &threads, uint64_t value, bool close_source, uint32_t &access)
 {
-	const uint64_t number = next_request++;
+	if (process_only)
+		return nullptr;
 	InheritedHandle request;
 	request.kind = request_kind;
 	request.handle = value;
-	request.size = number;
 	request.flags = close_source ? 1 : 0;
-	if (!send_frame(request, -1))
+	const auto answer = exchange(objects, threads, std::move(request));
+	if (!answer || answer->kind.empty() || answer->descriptor < 0)
 		return nullptr;
+	access = answer->handle_access;
+	auto object = object_from_record(*answer);
+	if (!object)
+		::close(answer->descriptor);
+	return object;
+}
+
+std::optional<InheritedHandle> HandleChannel::request_process(NativeObjects &objects, NativeThreads &threads, InheritedHandle request)
+{
+	if (!request.kind.starts_with("process:"))
+		return std::nullopt;
+	return exchange(objects, threads, std::move(request));
+}
+
+std::optional<InheritedHandle> HandleChannel::exchange(NativeObjects &objects, NativeThreads &threads, InheritedHandle request, int shared)
+{
+	const uint64_t number = next_request++;
+	request.size = number;
 	answers[number] = std::nullopt;
+	if (!send_frame(request, shared)) {
+		answers.erase(number);
+		return std::nullopt;
+	}
 	// The other process answers when it next schedules its threads; meanwhile the threads of this one run.
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	HostWait waiting;
 	threads.block([&] {
 		receive(objects);
 		const auto found = answers.find(number);
@@ -92,17 +194,11 @@ std::shared_ptr<KernelObject> HandleChannel::fetch(NativeObjects &objects, Nativ
 	const auto found = answers.find(number);
 	if (found == answers.end() || !found->second) {
 		answers.erase(number);
-		return nullptr;
+		return std::nullopt;
 	}
 	auto record = *found->second;
 	answers.erase(found);
-	if (record.kind.empty() || record.descriptor < 0)
-		return nullptr;
-	access = record.handle_access;
-	auto object = object_from_record(record);
-	if (!object)
-		::close(record.descriptor);
-	return object;
+	return record;
 }
 
 void HandleChannel::receive(NativeObjects &objects)
@@ -135,6 +231,55 @@ void HandleChannel::receive(NativeObjects &objects)
 			continue;
 		}
 		auto &record = records.front();
+		if (process_only && !record.kind.starts_with("process:") && record.kind != answer_prefix + "process") {
+			if (received >= 0) ::close(received);
+			continue;
+		}
+		if (record.kind.starts_with(transfer_prefix)) {
+			InheritedHandle answer;
+			answer.kind = answer_prefix + "transfer";
+			answer.handle = record.size;
+			answer.access = 0xc0000008U;
+			if (received >= 0) {
+				record.kind.erase(0, transfer_prefix.size());
+				record.size = record.handle;
+				record.descriptor = received;
+				const bool inherit = record.bits & 0x80000000U;
+				record.bits &= ~0x80000000U;
+				try {
+					if (const auto object = object_from_record(record)) {
+						const auto made = objects.add_object(object);
+						answer.access = made.status;
+						if (!made.status) {
+							objects.set_access(made.value, record.handle_access);
+							objects.set_inherit(made.value, inherit);
+							answer.size = made.value;
+						}
+					} else {
+						::close(received);
+						answer.access = 0xc00000bbU;
+					}
+				} catch (const std::exception &) {
+					answer.access = 0xc0000008U;
+				}
+			}
+			if (!send_frame(answer, -1) && answer.size) objects.close(answer.size);
+			continue;
+		}
+		if (record.kind.starts_with("process:")) {
+			if (received >= 0)
+				::close(received);
+			InheritedHandle answer;
+			answer.access = 0xc0000002U;
+			if (objects.process_request)
+				answer = objects.process_request(record);
+			answer.kind = answer_prefix + "process";
+			answer.handle = record.size;
+			const int shared = answer.descriptor;
+			answer.descriptor = -1;
+			send_frame(answer, shared);
+			continue;
+		}
 		if (record.kind == request_kind) {
 			// The other process wants one of this process's handles: the answer carries the descriptor behind it.
 			InheritedHandle answer;
@@ -180,7 +325,7 @@ void HandleChannel::receive(NativeObjects &objects)
 void set_parent_channel(int descriptor)
 {
 	std::lock_guard lock(channels_mutex);
-	parent = new HandleChannel(descriptor, handle_range_to_parent);
+	parent = new HandleChannel(descriptor);
 }
 
 HandleChannel *parent_channel()
@@ -203,6 +348,22 @@ void remove_child_channel(HandleChannel *channel)
 
 void receive_handles(NativeObjects &objects)
 {
+	const auto owners = retained_children();
+	if (process_channels.listener >= 0) {
+		for (;;) {
+			const int descriptor = ::accept4(process_channels.listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
+			if (descriptor < 0) break;
+			if (!process_peer(descriptor) || process_channels.accepted.size() >= 256) {
+				::close(descriptor);
+				continue;
+			}
+			process_channels.accepted.push_back(std::make_shared<HandleChannel>(descriptor, true));
+		}
+	}
+	std::erase_if(process_channels.accepted, [](const auto &channel) { return !channel->connected(); });
+	std::erase_if(process_channels.outgoing, [](const auto &entry) { return !entry.second || !entry.second->connected(); });
+	std::vector<std::shared_ptr<HandleChannel>> peers = process_channels.accepted;
+	for (const auto &[pid, channel] : process_channels.outgoing) peers.push_back(channel);
 	std::vector<HandleChannel *> sources;
 	{
 		std::lock_guard lock(channels_mutex);
@@ -212,6 +373,10 @@ void receive_handles(NativeObjects &objects)
 	}
 	for (auto *channel : sources)
 		channel->receive(objects);
+	for (const auto &channel : peers)
+		channel->receive(objects);
+	// Drain the final transfers before releasing a child that has exited.
+	(void)live_children();
 }
 
 }

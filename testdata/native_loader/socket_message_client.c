@@ -1,0 +1,206 @@
+#define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0600
+#include <winsock2.h>
+#include <windows.h>
+#include <mswsock.h>
+#include <ws2tcpip.h>
+
+static void zero(void *address, unsigned size)
+{
+	for (unsigned index = 0; index < size; ++index) ((BYTE *)address)[index] = 0;
+}
+
+static int received(SOCKET socket, int length)
+{
+	char bytes[32];
+	const char expected[] = "first-second";
+	if (recv(socket, bytes, sizeof(bytes), 0) != length) return 0;
+	for (int index = 0; index < length; ++index) if (bytes[index] != expected[index]) return 0;
+	return 1;
+}
+
+static int rejected(LPFN_WSASENDMSG send_message, SOCKET socket, WSAMSG *message, DWORD flags, int error)
+{
+	DWORD sent = 0xcccccccc;
+	return send_message(socket, message, flags, &sent, NULL, NULL) == SOCKET_ERROR &&
+		WSAGetLastError() == error && sent == 0xcccccccc;
+}
+
+static int datagrams(int family)
+{
+	SOCKET receiver = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+	SOCKET sender = WSASocketW(family, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
+	SOCKADDR_STORAGE address;
+	int address_size = family == AF_INET ? sizeof(SOCKADDR_IN) : sizeof(SOCKADDR_IN6);
+	zero(&address, sizeof(address));
+	address.ss_family = (USHORT)family;
+	if (family == AF_INET) ((SOCKADDR_IN *)&address)->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	else ((SOCKADDR_IN6 *)&address)->sin6_addr.s6_addr[15] = 1;
+	if (receiver == INVALID_SOCKET || sender == INVALID_SOCKET ||
+		bind(receiver, (SOCKADDR *)&address, address_size) || getsockname(receiver, (SOCKADDR *)&address, &address_size)) return 10;
+	LPFN_WSASENDMSG send_message = NULL;
+	GUID guid = WSAID_WSASENDMSG;
+	DWORD returned = 0;
+	if (WSAIoctl(sender, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid), &send_message,
+		sizeof(send_message), &returned, NULL, NULL) || !send_message || returned != sizeof(send_message) ||
+		(FARPROC)send_message != GetProcAddress(GetModuleHandleW(L"ws2_32.dll"), "WSASendMsg")) return 11;
+	WSABUF buffers[2] = {{6, "first-"}, {6, "second"}};
+	WSAMSG message;
+	zero(&message, sizeof(message));
+	message.name = (SOCKADDR *)&address;
+	message.namelen = address_size;
+	message.lpBuffers = buffers;
+	message.dwBufferCount = 2;
+	message.dwFlags = 0xdeadbeef;
+	DWORD sent = 0;
+	if (send_message(sender, &message, 0, &sent, NULL, NULL) || sent != 12 ||
+		message.dwFlags != 0xdeadbeef || !received(receiver, 12)) return 12;
+	union { WSACMSGHDR aligned; char bytes[128]; } control;
+	zero(&control, sizeof(control));
+	message.Control.buf = control.bytes;
+	const unsigned packet_size = family == AF_INET ? sizeof(IN_PKTINFO) : sizeof(IN6_PKTINFO);
+	message.Control.len = WSA_CMSG_SPACE(packet_size);
+	WSACMSGHDR *header = WSA_CMSG_FIRSTHDR(&message);
+	header->cmsg_len = WSA_CMSG_LEN(packet_size);
+	header->cmsg_level = family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6;
+	header->cmsg_type = family == AF_INET ? IP_PKTINFO : IPV6_PKTINFO;
+	if (family == AF_INET) ((IN_PKTINFO *)WSA_CMSG_DATA(header))->ipi_addr = ((SOCKADDR_IN *)&address)->sin_addr;
+	else ((IN6_PKTINFO *)WSA_CMSG_DATA(header))->ipi6_addr = ((SOCKADDR_IN6 *)&address)->sin6_addr;
+	if (send_message(sender, &message, 0, &sent, NULL, NULL) || sent != 12 || !received(receiver, 12)) return 13;
+	zero(&control, sizeof(control));
+	message.Control.len = WSA_CMSG_SPACE(sizeof(INT));
+	header->cmsg_len = WSA_CMSG_LEN(sizeof(INT));
+	header->cmsg_level = family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6;
+	header->cmsg_type = family == AF_INET ? IP_ECN : IPV6_ECN;
+	*(INT *)WSA_CMSG_DATA(header) = 2;
+	if (send_message(sender, &message, 0, &sent, NULL, NULL) || !received(receiver, 12)) return 14;
+	message.Control.len = 0;
+	message.Control.buf = NULL;
+	OVERLAPPED overlapped;
+	zero(&overlapped, sizeof(overlapped));
+	overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+	HANDLE port = CreateIoCompletionPort((HANDLE)sender, NULL, 0x1234, 0);
+	if (!overlapped.hEvent || !port || send_message(sender, &message, 0, &sent, &overlapped, NULL) ||
+		sent != 12 || WaitForSingleObject(overlapped.hEvent, 1000) != WAIT_OBJECT_0 || !received(receiver, 12)) return 15;
+	ULONG_PTR key = 0;
+	OVERLAPPED *completion = NULL;
+	DWORD flags = 99;
+	if (!GetQueuedCompletionStatus(port, &sent, &key, &completion, 1000) || sent != 12 || key != 0x1234 ||
+		completion != &overlapped || !WSAGetOverlappedResult(sender, &overlapped, &sent, FALSE, &flags) || sent != 12 || flags) return 16;
+	CloseHandle(overlapped.hEvent);
+	CloseHandle(port);
+	if (connect(sender, (SOCKADDR *)&address, address_size)) return 17;
+	message.name = NULL;
+	message.namelen = 0;
+	if (send_message(sender, &message, 0, &sent, NULL, NULL) || !received(receiver, 12)) return 18;
+	buffers[0].len = 0;
+	message.dwBufferCount = 1;
+	if (send_message(sender, &message, 0, &sent, NULL, NULL) || sent || !received(receiver, 0)) return 19;
+	buffers[0].len = 6;
+	message.dwBufferCount = 2;
+	if (!rejected(send_message, INVALID_SOCKET, &message, 0, WSAENOTSOCK) ||
+		!rejected(send_message, sender, (WSAMSG *)1, 0, WSAEFAULT) ||
+		!rejected(send_message, sender, &message, MSG_PEEK, WSAEOPNOTSUPP)) return 20;
+	message.dwBufferCount = 65;
+	if (!rejected(send_message, sender, &message, 0, WSAENOBUFS)) return 21;
+	message.dwBufferCount = 2;
+	buffers[0].buf = (char *)1;
+	if (!rejected(send_message, sender, &message, 0, WSAEFAULT)) return 22;
+	buffers[0].buf = "first-";
+	message.Control.len = 1;
+	if (!rejected(send_message, sender, &message, 0, WSAEFAULT)) return 23;
+	message.Control.buf = control.bytes;
+	message.Control.len = sizeof(WSACMSGHDR);
+	header->cmsg_len = sizeof(WSACMSGHDR) - 1;
+	if (!rejected(send_message, sender, &message, 0, WSAEINVAL)) return 24;
+	header->cmsg_len = sizeof(WSACMSGHDR);
+	header->cmsg_type = 0x1234;
+	if (!rejected(send_message, sender, &message, 0, WSAENOPROTOOPT)) return 25;
+	message.Control.len = 0;
+	if (send_message(sender, &message, 0, NULL, NULL, NULL) != SOCKET_ERROR || WSAGetLastError() != WSAEFAULT) return 26;
+	message.name = NULL;
+	message.namelen = address_size;
+	if (!rejected(send_message, sender, &message, 0, WSAEFAULT)) return 27;
+	message.namelen = 0;
+	if (send_message(sender, &message, 0, &sent, NULL, (LPWSAOVERLAPPED_COMPLETION_ROUTINE)(ULONG_PTR)1) != SOCKET_ERROR ||
+		WSAGetLastError() != WSAEOPNOTSUPP) return 29;
+	SOCKET stream = socket(family, SOCK_STREAM, IPPROTO_TCP);
+	if (stream == INVALID_SOCKET || !rejected(send_message, stream, &message, 0, WSAEOPNOTSUPP)) return 30;
+	closesocket(stream);
+	DWORD *protected_out = VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE), protection;
+	if (!protected_out) return 31;
+	*protected_out = 0xcccccccc;
+	if (!VirtualProtect(protected_out, 4096, PAGE_READONLY, &protection) ||
+		send_message(sender, &message, 0, protected_out, NULL, NULL) != SOCKET_ERROR || WSAGetLastError() != WSAEFAULT ||
+		*protected_out != 0xcccccccc || !VirtualFree(protected_out, 0, MEM_RELEASE)) return 32;
+	ULONG nonblocking = 1;
+	char byte;
+	if (ioctlsocket(receiver, FIONBIO, &nonblocking) || recv(receiver, &byte, 1, 0) != SOCKET_ERROR || WSAGetLastError() != WSAEWOULDBLOCK) return 28;
+	closesocket(sender);
+	closesocket(receiver);
+	return 0;
+}
+
+static int network_event(SOCKET socket, HANDLE event, long expected)
+{
+	WSANETWORKEVENTS events;
+	if (WaitForSingleObject(event, 1000) != WAIT_OBJECT_0 || WSAEnumNetworkEvents(socket, event, &events) ||
+		events.lNetworkEvents != expected) return 0;
+	for (unsigned index = 0; index < FD_MAX_EVENTS; ++index)
+		if (events.iErrorCode[index]) return 0;
+	return 1;
+}
+
+static int selected_events(void)
+{
+	SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	SOCKADDR_IN address;
+	zero(&address, sizeof(address));
+	address.sin_family = AF_INET;
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	int size = sizeof(address);
+	HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (!event || listener == INVALID_SOCKET || client == INVALID_SOCKET || bind(listener, (SOCKADDR *)&address, size) ||
+		getsockname(listener, (SOCKADDR *)&address, &size) || listen(listener, 2) || WSAEventSelect(listener, event, FD_ACCEPT) ||
+		connect(client, (SOCKADDR *)&address, size) || !network_event(listener, event, FD_ACCEPT)) return 40;
+	SOCKET server = accept(listener, NULL, NULL);
+	closesocket(listener);
+	if (server == INVALID_SOCKET || WSAEventSelect(server, event, FD_READ | FD_WRITE | FD_CLOSE) ||
+		!network_event(server, event, FD_WRITE)) return 41;
+	WSANETWORKEVENTS events;
+	for (unsigned index = 0; index < 1000; ++index) {
+		Sleep(0);
+		if (WSAEnumNetworkEvents(server, event, &events) || events.lNetworkEvents ||
+			WaitForSingleObject(event, 0) != WAIT_TIMEOUT) return 42;
+	}
+	if (send(client, "ab", 2, 0) != 2 || !network_event(server, event, FD_READ) ||
+		WSAEnumNetworkEvents(server, event, &events) || events.lNetworkEvents) return 43;
+	char byte;
+	if (recv(server, &byte, 1, 0) != 1 || byte != 'a' || !network_event(server, event, FD_READ) ||
+		recv(server, &byte, 1, 0) != 1 || byte != 'b') return 44;
+	if (WSAEventSelect(server, NULL, 0) || send(client, "c", 1, 0) != 1) return 45;
+	Sleep(10);
+	if (WaitForSingleObject(event, 0) != WAIT_TIMEOUT || WSAEnumNetworkEvents(server, event, &events) ||
+		events.lNetworkEvents || WSAEventSelect(server, event, FD_READ | FD_CLOSE) ||
+		!network_event(server, event, FD_READ) || recv(server, &byte, 1, 0) != 1 || byte != 'c') return 46;
+	if (closesocket(client) || !network_event(server, event, FD_CLOSE) ||
+		WSAEnumNetworkEvents(server, event, &events) || events.lNetworkEvents ||
+		WaitForSingleObject(event, 0) != WAIT_TIMEOUT) return 47;
+	closesocket(server);
+	CloseHandle(event);
+	return 0;
+}
+
+int raven_entry(void)
+{
+	WSADATA data;
+	if (WSAStartup(MAKEWORD(2, 2), &data)) return 1;
+	int result = datagrams(AF_INET);
+	if (result) return result;
+	result = datagrams(AF_INET6);
+	if (result) return result + 100;
+	result = selected_events();
+	if (result) return result;
+	WSACleanup();
+	return 0;
+}

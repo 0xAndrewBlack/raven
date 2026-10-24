@@ -131,9 +131,9 @@ static bool served_api(std::string_view module, std::string_view name)
 		return name == "RtlWakeConditionVariable" || name == "RtlWakeAllConditionVariable";
 	if (module != "vulkan-1.dll")
 		return false;
-	static constexpr std::array<std::string_view, 22> recording{
+	static constexpr std::array<std::string_view, 23> recording{
 		"vkAcquireNextImageKHR", "vkAllocateCommandBuffers", "vkAllocateDescriptorSets", "vkBeginCommandBuffer", "vkEndCommandBuffer", "vkFreeCommandBuffers",
-		"vkFreeDescriptorSets", "vkGetFenceStatus", "vkGetSemaphoreCounterValue", "vkGetSemaphoreCounterValueKHR", "vkQueueSubmit",
+		"vkFreeDescriptorSets", "vkGetDescriptorEXT", "vkGetFenceStatus", "vkGetSemaphoreCounterValue", "vkGetSemaphoreCounterValueKHR", "vkQueueSubmit",
 		"vkQueueSubmit2", "vkQueueSubmit2KHR", "vkResetCommandBuffer", "vkResetCommandPool", "vkResetDescriptorPool", "vkResetFences",
 		"vkSignalSemaphore", "vkSignalSemaphoreKHR", "vkUpdateDescriptorSetWithTemplate", "vkUpdateDescriptorSetWithTemplateKHR",
 		"vkUpdateDescriptorSets"};
@@ -143,7 +143,7 @@ static bool served_api(std::string_view module, std::string_view name)
 // A served stub: it loads the block address from the provider's own pointer, which stays zero until the runtime maps the block, stores
 // RCX, RDX, R8, R9, RSP and the low halves of XMM0 to XMM3, publishes its own address and spins until the runtime clears it. After a
 // thousand rounds it stops at a breakpoint instead, which gives the processor to the runtime when the two compete for it.
-static constexpr size_t served_stub_size = 128, served_trap = 0x70, served_wait = 85;
+static constexpr size_t served_stub_size = 128, served_trap = 0x70, served_wait = 85, served_yield = 101;
 
 static std::vector<uint8_t> served_stub(int32_t to_pointer)
 {
@@ -154,8 +154,8 @@ static std::vector<uint8_t> served_stub(int32_t to_pointer)
 		// mov r11d, 1000; spin: pause; cmp qword [r10], 0; je done; dec r11d; jnz spin; int3; jmp to the compare; nop
 		0x41, 0xbb, 0xe8, 0x03, 0x00, 0x00, 0xf3, 0x90, 0x49, 0x83, 0x3a, 0x00, 0x74, 0x0a, 0x41, 0xff, 0xcb, 0x75, 0xf3, 0xcc, 0xeb, 0xf2,
 		0x66, 0x90,
-		// done: mov rax, [r10+80]; ret
-		0x49, 0x8b, 0x42, 0x50, 0xc3};
+		// done: mov rax, [r10+80]; cmp qword [r10+88], 0; je return; int3; return: ret
+		0x49, 0x8b, 0x42, 0x50, 0x49, 0x83, 0x7a, 0x58, 0x00, 0x74, 0x01, 0xcc, 0xc3};
 	const int32_t displacement = to_pointer - 7;
 	std::memcpy(code.data() + 3, &displacement, 4);
 	code.resize(served_trap + 2);
@@ -1021,6 +1021,9 @@ static std::vector<uint8_t> commit_prelude(int32_t to_pointer, int32_t to_trap)
 // breakpoint it falls back to.
 static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view module, std::string_view name, uint32_t rva)
 {
+	if (module == "ntdll.dll" && rva <= image.size() && image.size() - rva >= 11 &&
+		image[rva] == 0x4c && image[rva + 1] == 0x8b && image[rva + 2] == 0xd1 && image[rva + 3] == 0xb8)
+		return rva;
 	// A provider built without guest-side paths has the breakpoint at the export itself.
 	if (rva < image.size() && image[rva] == 0xcc)
 		return rva;
@@ -1044,6 +1047,17 @@ static uint32_t served_stub_rva(std::span<const uint8_t> image, std::string_view
 	int32_t relative = 0;
 	std::memcpy(&relative, image.data() + rva + 12, 4);
 	return uint32_t(int64_t(rva) + 16 + relative);
+}
+
+static uint32_t nt_service_number(std::string_view module, std::string_view name)
+{
+	if (module != "ntdll.dll" || (!name.starts_with("Nt") && !name.starts_with("Zw")))
+		return 0;
+	const std::string canonical = "Nt" + std::string(name.substr(2));
+	const auto names = system_export_names("ntdll.dll");
+	const auto found = std::lower_bound(names.begin(), names.end(), canonical);
+	// Use the complete name table so a copied service keeps its identity across different process import graphs.
+	return found != names.end() && *found == canonical ? 0x10000 + uint32_t(found - names.begin()) : 0;
 }
 
 uint64_t api_trap_address(const PEModule &provider, std::string_view module, std::string_view name, uint32_t address)
@@ -1216,8 +1230,14 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 	size_t fast_next = 0, served_next = 0, clock_next = 0, commit_next = 0, strings_next = strings_start, blocks_next = blocks_start;
 	for (size_t index = 0; index < exports.size(); ++index) {
 		size_t code = 0x200 + index * 16;
+		const uint32_t service = x86 ? 0 : nt_service_number(name, exports[index]);
 		bytes[code] = 0xcc;
 		bytes[code + 1] = 0xc3;
+		if (service) {
+			const std::array<uint8_t, 11> entry{0x4c, 0x8b, 0xd1, 0xb8, 0, 0, 0, 0, 0x0f, 0x05, 0xc3};
+			std::copy(entry.begin(), entry.end(), bytes.begin() + ptrdiff_t(code));
+			put(code + 4, service);
+		}
 		if (!x86 && served_api(name, exports[index])) {
 			code = served_start + 64 + served_next++ * served_stub_size;
 			const auto stub = served_stub(int32_t(served_start) - int32_t(code));
@@ -1229,7 +1249,7 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 				std::copy(prelude.begin(), prelude.end(), bytes.begin() + ptrdiff_t(code));
 			}
 		}
-		if (const auto *prelude = fast_paths && !x86 ? block_prelude(name, exports[index]) : nullptr) {
+		if (const auto *prelude = fast_paths && !x86 && !service ? block_prelude(name, exports[index]) : nullptr) {
 			const size_t trap = code;
 			code = blocks_next;
 			blocks_next += (prelude->size() + 63) & ~size_t(63);
@@ -1249,7 +1269,7 @@ std::vector<uint8_t> runtime_provider(std::string_view name, uint64_t base,
 			std::memcpy(bytes_of.data() + bytes_of.size() - 4, &relative, 4);
 			std::copy(bytes_of.begin(), bytes_of.end(), bytes.begin() + ptrdiff_t(code));
 		}
-		if (!x86 && served_count && guest_commit_api(name, exports[index])) {
+		if (!x86 && !service && served_count && guest_commit_api(name, exports[index])) {
 			const size_t trap = code;
 			code = commit_start + commit_next++ * commit_prelude_size;
 			const auto prelude = guest_memory_api(name, exports[index]) == GuestMemoryApi::commit ?
@@ -1336,6 +1356,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	load_initial_dependencies(modules,source,native_modules);
 	std::map<uint64_t, std::string> traps;
 	std::map<uint64_t,std::pair<uint32_t,std::string>> services;
+	std::map<uint32_t, std::string> generated_services;
 	std::vector<std::string_view> nt_names(NativeMemory::nt_exports().begin(),NativeMemory::nt_exports().end());
 	nt_names.insert(nt_names.end(),NativeEnvironment::nt_exports().begin(),NativeEnvironment::nt_exports().end());
 	nt_names.insert(nt_names.end(),NativeObjectAPI::nt_exports().begin(),NativeObjectAPI::nt_exports().end());
@@ -1350,13 +1371,13 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			nt_names.push_back(name);
 	}
 	// Natives that the shared API registry implements.
-	for (const auto name : {"NtQuerySection", "NtFlushInstructionCache", "RtlAddGrowableFunctionTable", "RtlGrowFunctionTable", "RtlDeleteGrowableFunctionTable",
-		"NtWriteFile", "RtlNtStatusToDosError", "NtQueryObject", "NtMapViewOfSection", "NtUnmapViewOfSection",
+	for (const auto name : {"NtSetInformationThread", "NtOpenThreadToken", "NtOpenThreadTokenEx", "NtOpenThread", "NtOpenProcess", "NtOpenProcessToken", "NtOpenProcessTokenEx", "NtQueryInformationProcess", "NtReadVirtualMemory", "NtWriteVirtualMemory", "NtQuerySection", "NtFlushInstructionCache", "RtlAddGrowableFunctionTable", "RtlGrowFunctionTable", "RtlDeleteGrowableFunctionTable",
+		"NtWriteFile", "NtQueryDirectoryFile", "ZwQueryDirectoryFile", "RtlNtStatusToDosError", "NtQueryObject", "NtMapViewOfSection", "NtUnmapViewOfSection",
 		"RtlAcquireSRWLockExclusive", "RtlAcquireSRWLockShared", "RtlWakeConditionVariable", "RtlWakeAllConditionVariable", "RtlWaitOnAddress",
 		"RtlWakeAddressSingle", "RtlWakeAddressAll",
 		// What the runtime's own components import from ntdll, which they need whether a program loads them at start or later.
 		"DbgPrint", "NtCancelIoFile", "NtCreateSection", "NtFsControlFile", "NtReadFile", "RtlCreateUnicodeStringFromAsciiz", "RtlFreeHeap",
-		"RtlFreeUnicodeString", "RtlGetVersion", "RtlIpv6AddressToStringExW", "RtlIpv6StringToAddressW", "RtlLengthSid", "RtlUnicodeToMultiByteN",
+		"RtlFreeUnicodeString", "RtlDllShutdownInProgress", "RtlGetVersion", "RtlIpv6AddressToStringExW", "RtlIpv6StringToAddressW", "RtlLengthSid", "RtlUnicodeToMultiByteN",
 		"RtlUnicodeToMultiByteSize", "RtlIsTextUnicode", "RtlImageNtHeader", "NtDeleteKey",
 		// The unwinding of 64-bit frames, which libraries built with their own exception handling import.
 		"RtlCaptureContext", "RtlLookupFunctionEntry", "RtlPcToFileHeader", "RtlVirtualUnwind", "RtlUnwindEx",
@@ -1505,6 +1526,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				if (symbol.address && (modules.all().at("ntdll.dll")->runtime_api || std::find(nt_names.begin(),nt_names.end(),name)!=nt_names.end()) && symbol.forwarder.empty()) {
 					const auto &image=*modules.all().at("ntdll.dll");
 					if (image.runtime_api) {
+						if (const uint32_t number = nt_service_number("ntdll.dll", name)) {
+							generated_services.emplace(number, "Nt" + name.substr(2));
+							continue;
+						}
 						traps.emplace(api_trap_address(image,"ntdll.dll",name,symbol.address),name.starts_with("Zw") ? "Nt"+name.substr(2) : name);
 						continue;
 					}
@@ -1640,13 +1665,19 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 							return std::string("?");
 						};
 						const auto registers=process.context().registers;
-						std::cerr << "fault: signal " << result.signal << " at " << std::hex << result.instruction << " (" << describe(result.instruction) << ")";
-						try {
-							const auto stack=process.read_memory(registers.rsp,16);
-							uint64_t first=0,second=0;
-							std::memcpy(&first,stack.data(),8);std::memcpy(&second,stack.data()+8,8);
-							std::cerr << " [rsp]=" << first << " (" << describe(first) << ") [rsp+8]=" << second << " (" << describe(second) << ")";
-						} catch (...) {}
+						std::cerr << "fault: signal " << result.signal << " at " << std::hex << result.instruction << " (" << describe(result.instruction) << ")"
+							<< " address=" << result.fault_address << " rax=" << registers.rax << " rbx=" << registers.rbx
+							<< " rcx=" << registers.rcx << " rdx=" << registers.rdx << " rsp=" << registers.rsp;
+						for (const auto address : {registers.rsp, registers.rbx}) {
+							try {
+								const auto bytes = process.read_memory(address, 64);
+								for (size_t at = 0; at < bytes.size(); at += 8) {
+									uint64_t value = 0;
+									std::memcpy(&value, bytes.data() + at, 8);
+									std::cerr << " [" << address + at << "]=" << value << " (" << describe(value) << ")";
+								}
+							} catch (const std::runtime_error &) {}
+						}
 						std::cerr << std::dec << '\n';
 					}
 					// A CPU fault is a Windows exception: structured handlers of the faulting frames get the first chance.
@@ -1678,36 +1709,38 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				result=process.resume(budget);
 				continue;
 			}
-			if (result.stop==NativeStop::syscall) {
-				const auto service=services.find(result.instruction);
-				if (service==services.end() || service->second.first!=result.value)
+			const std::string *service_name = nullptr;
+			if (result.stop == NativeStop::syscall) {
+				const auto supplied = services.find(result.instruction);
+				const auto generated = generated_services.find(uint32_t(result.value));
+				if (supplied != services.end() && supplied->second.first == result.value)
+					service_name = &supplied->second.second;
+				else if (result.value <= UINT32_MAX && generated != generated_services.end())
+					service_name = &generated->second;
+				else
 					return result;
-				process.enter_nt_service(result.instruction,service->second.first);
-				if (!environment.dispatch(service->second.second) && !memory.dispatch(service->second.second) && !object_api.dispatch(service->second.second))
-					throw std::runtime_error("identified NT service was not dispatched");
-				const auto budget=remaining();
-				if (budget.count()<=0)
-					return NativeResult{NativeStop::timeout,0,result.instruction,0};
-				result=process.resume(budget);
-				continue;
+				process.enter_nt_service(result.instruction, uint32_t(result.value));
 			}
 			const auto found = traps.find(result.value);
-			if (found!=traps.end() && found->second=="ExitProcess") {
+			if (!service_name && found == traps.end())
+				return result;
+			const auto &api_name = service_name ? *service_name : found->second;
+			if (api_name == "ExitProcess") {
 				const auto code=uint32_t(process.api_arguments(1)[0]);
 				process.abandon_call();
 				throw ProcessExit{code,result.instruction};
 			}
-			if (found == traps.end())
-				return result;
 			// RAVEN_TRACE_API is 1 for every call or a comma-separated list of API names to follow.
 			bool tracing = false;
 			static const char *const trace_selection = std::getenv("RAVEN_TRACE_API");
-			if (const char *selection = trace_selection) {
+			static const char *const trace_program = std::getenv("RAVEN_TRACE_PROGRAM");
+			if (const char *selection = trace_selection; selection &&
+				(!trace_program || equal_fold(from_utf8(entry.name), from_utf8(trace_program)))) {
 				const std::string wanted = std::string(",") + selection + ",";
-				tracing = wanted == ",1," || wanted.find("," + found->second + ",") != wanted.npos;
+				tracing = wanted == ",1," || wanted.find("," + api_name + ",") != wanted.npos;
 			}
 			if (tracing) {
-				std::cerr << "api " << found->second << '(' << std::hex;
+				std::cerr << "api " << api_name << '(' << std::hex;
 				// RAVEN_TRACE_ARGS widens the argument list shown (the default is the four register arguments).
 				const char *width = std::getenv("RAVEN_TRACE_ARGS");
 				for (const auto value : process.api_arguments(width ? std::clamp(std::atoi(width), 1, 12) : 4))
@@ -1733,17 +1766,23 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				static std::map<std::string,int> seen;
 				const std::string text(spec);
 				const auto first = text.find(':'), second = text.find(':', first + 1);
-				if (first != text.npos && second != text.npos && found->second == text.substr(0, first) &&
-					++seen[found->second] == std::stoi(text.substr(first + 1, second - first - 1)))
-					process.trace_instructions(size_t(std::stoul(text.substr(second + 1))), [&modules](uint64_t rip) {
+				if (first != text.npos && second != text.npos && api_name == text.substr(0, first) &&
+					++seen[api_name] == std::stoi(text.substr(first + 1, second - first - 1)))
+					process.trace_instructions(size_t(std::stoul(text.substr(second + 1))), [&modules, &process](uint64_t rip) {
 						std::cerr << "step";
 						for (const auto &[module_name, module] : modules.all())
 							if (rip >= module->loaded.base() && rip < module->loaded.base() + module->image.image_size)
 								std::cerr << ' ' << module_name << '+' << std::hex << rip - module->loaded.base() << std::dec;
+						if (std::getenv("RAVEN_TRACE_STRINGS")) {
+							const auto registers = process.context().registers;
+							for (const auto value : {registers.rcx, registers.rdx, registers.r8, registers.r9})
+								if (const auto value_text = describe_text(process, value); !value_text.empty())
+									std::cerr << " <" << value_text << '>';
+						}
 						std::cerr << '\n';
 					});
 			}
-			if (found->second=="RtlRaiseStatus")
+			if (api_name=="RtlRaiseStatus")
 				return native_raise_rtl_exception(process,true);
 			// A thread that never waits still answers the other processes, a few times every second at most.
 			if (const auto now = std::chrono::steady_clock::now(); now - last_service >= std::chrono::milliseconds(2)) {
@@ -1752,10 +1791,10 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					threads_ptr->serve();
 			}
 			bool dispatched;
-			api_in_progress = found->second.c_str();
+			api_in_progress = api_name.c_str();
 			windows.apply_dc_log();
 			windows.take_deferred([&desktop](uint32_t operation, uint64_t handle) { desktop.apply_deferred(operation, handle); });
-			windows.screen_dc_use(found->second);
+			windows.screen_dc_use(api_name);
 			const auto profile_start = RuntimeProfile::instance().enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 			static const bool trace_failures = std::getenv("RAVEN_TRACE_FAIL");
 			const auto error_before = trace_failures ? environment.last_error() : 0;
@@ -1763,9 +1802,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			try {
 				const WindowCallScope window_scope(windows);
 				// The generalized desktop services come first so that they replace the older narrow ones.
-				dispatched = desktop_api.dispatch(process, environment, found->second) || environment.dispatch(found->second) || module_api.dispatch(found->second) || resources.dispatch(found->second) || memory.dispatch(found->second) || object_api.dispatch(found->second) || heap.dispatch(found->second) || desktop.dispatch(found->second) || windows.dispatch(found->second) || api_registry.dispatch(process, environment, found->second)
+				dispatched = desktop_api.dispatch(process, environment, api_name) || environment.dispatch(api_name) || module_api.dispatch(api_name) || resources.dispatch(api_name) || memory.dispatch(api_name) || object_api.dispatch(api_name) || heap.dispatch(api_name) || desktop.dispatch(api_name) || windows.dispatch(api_name) || api_registry.dispatch(process, environment, api_name)
 #ifdef RAVEN_VULKAN
-					|| vulkan.dispatch(found->second)
+					|| vulkan.dispatch(api_name)
 #endif
 					;
 			} catch (const ExecutionRedirected &redirected) {
@@ -1777,12 +1816,12 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				continue;
 			}
 			if (RuntimeProfile::instance().enabled())
-				RuntimeProfile::instance().api(found->second, std::chrono::steady_clock::now() - profile_start);
+				RuntimeProfile::instance().api(api_name, std::chrono::steady_clock::now() - profile_start);
 			if (!dispatched && std::getenv("RAVEN_SURVEY_MISSING")) {
 				// Survey aid: report each missing API once and fail it, so one run lists every API a program reaches.
 				static std::set<std::string> reported;
-				if (reported.insert(found->second).second)
-					std::cerr << "raven: missing " << found->second << '\n';
+				if (reported.insert(api_name).second)
+					std::cerr << "raven: missing " << api_name << '\n';
 				environment.set_last_error(120);
 				process.return_api(0);
 				budget = remaining();
@@ -1790,7 +1829,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				continue;
 			}
 			if (!dispatched) {
-				std::cerr << "raven: unimplemented native API " << found->second << '\n';
+				std::cerr << "raven: unimplemented native API " << api_name << '\n';
 				// RAVEN_CONTINUE_UNIMPLEMENTED lists every missing function of a run: each call fails with ERROR_CALL_NOT_IMPLEMENTED instead.
 				if (!std::getenv("RAVEN_CONTINUE_UNIMPLEMENTED"))
 					return result;
@@ -1803,9 +1842,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			if (tracing)
 				std::cerr << "  -> " << std::hex << process.result_register() << std::dec << " (error " << environment.last_error() << ")\n";
 			if (trace_failures && environment.last_error() != error_before) {
-				std::cerr << "fail " << found->second << " error " << environment.last_error() << " args";
+				std::cerr << "fail " << api_name << " error " << environment.last_error() << " args";
 				for (const auto value : failure_arguments) std::cerr << ' ' << std::hex << value << std::dec;
-				if (found->second == "CreateWindowExW" && failure_arguments.size() > 1) {
+				if (api_name == "CreateWindowExW" && failure_arguments.size() > 1) {
 					std::string class_name;
 					try {
 						if (failure_arguments[1] > 0xffff) {
@@ -1821,8 +1860,8 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				static constexpr std::string_view named[] = {"LoadLibraryExW", "LoadLibraryW", "CreateFileW", "GetFileAttributesW",
 					"GetFileAttributesExW", "FindFirstFileW", "FindFirstFileExW", "CreateDirectoryW", "DeleteFileW", "OpenEventW", "OpenMutexW",
 					"CreateFileMappingW", "OpenFileMappingW"};
-				const bool name_first = std::find(std::begin(named), std::end(named), found->second) != std::end(named);
-				const size_t name_index = found->second == "CreateFileMappingW" ? 5 : found->second.starts_with("Open") ? 2 : 0;
+				const bool name_first = std::find(std::begin(named), std::end(named), api_name) != std::end(named);
+				const size_t name_index = api_name == "CreateFileMappingW" ? 5 : api_name.starts_with("Open") ? 2 : 0;
 				if (name_first && failure_arguments.size() > name_index && failure_arguments[name_index] > 0xffff) {
 					std::string text;
 					try {
@@ -1855,7 +1894,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 					result = process.resume(budget);
 				} catch (const std::runtime_error &failure) {
 					// A handler that leaves the call without its answer is named, since the global name may belong to another thread by now.
-					throw std::runtime_error(std::string(failure.what()) + " after " + found->second);
+					throw std::runtime_error(std::string(failure.what()) + " after " + api_name);
 				}
 			}
 		}
@@ -1891,7 +1930,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	KernelContext kernel{process, environment, memory, allocator, kernel_objects, threads, paths, modules, entry, *launch, invoke};
 	threads.set_watched([reactor = kernel.reactor](std::vector<pollfd> &descriptors) { reactor->watch(descriptors); });
 	windows.set_global_allocator([&allocator](uint64_t size) { return allocator.allocate(size,true); });
-	kernel.message_ready=[&windows](uint32_t thread) { return windows.input_pending(thread); };
+	kernel.queue_status=[&windows](uint32_t thread,uint32_t mask,bool clear) { return windows.queue_status(thread,mask,clear); };
 	windows.set_block([&threads](std::function<bool()> ready) {
 		HostWait waiting;
 		threads.block(std::move(ready), std::nullopt);
@@ -1916,17 +1955,20 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	// the same images starts with its stubs trapping.
 	struct ServedPointers {
 		std::vector<uint8_t *> places;
+		std::vector<std::pair<uint8_t *, std::array<uint8_t, 12>>> entries;
 		~ServedPointers()
 		{
 			for (auto *place : places)
 				std::memset(place, 0, 8);
+			for (const auto &[place, bytes] : entries)
+				std::copy(bytes.begin(), bytes.end(), place);
 		}
 	} served_pointers;
 	for (const auto &[module_name, module] : modules.all()) {
 		if (!module->runtime_api)
 			continue;
 		for (const auto &symbol : module->exports) {
-			if (symbol.address && !symbol.names.empty() && symbol.forwarder.empty() && block_prelude(module_name, symbol.names.at(0)) &&
+			if (!process.parallel() && symbol.address && !symbol.names.empty() && symbol.forwarder.empty() && block_prelude(module_name, symbol.names.at(0)) &&
 				served_stub_rva(module->loaded.data(), module_name, symbol.names.at(0), symbol.address) != symbol.address) {
 				auto image = module->loaded.data();
 				int32_t displacement = 0;
@@ -1938,16 +1980,27 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				continue;
 			auto image = module->loaded.data();
 			const uint32_t stub = served_stub_rva(image, module_name, symbol.names.at(0), symbol.address);
-			int32_t displacement = 0;
-			std::memcpy(&displacement, image.data() + stub + 3, 4);
-			std::memcpy(image.data() + stub + 7 + displacement, &served_guest, 8);
-			served_pointers.places.push_back(image.data() + stub + 7 + displacement);
+			if (process.parallel()) {
+				std::array<uint8_t, 12> previous{};
+				std::copy_n(image.data() + stub, previous.size(), previous.begin());
+				served_pointers.entries.emplace_back(image.data() + stub, previous);
+				// Load this thread's block through GS; keep every completion trap at its original offset.
+				const std::array<uint8_t, 12> local{0x65, 0x4c, 0x8b, 0x14, 0x25, 0xf0, 0x1f, 0, 0, 0x90, 0x90, 0x90};
+				std::copy(local.begin(), local.end(), image.data() + stub);
+			} else {
+				int32_t displacement = 0;
+				std::memcpy(&displacement, image.data() + stub + 3, 4);
+				std::memcpy(image.data() + stub + 7 + displacement, &served_guest, 8);
+				served_pointers.places.push_back(image.data() + stub + 7 + displacement);
+			}
 			served_names.emplace(module->loaded.base() + stub, symbol.names.at(0));
 		}
 	}
-	std::vector<uint64_t> served_stubs;
-	for (const auto &[stub, name] : served_names)
+	std::vector<uint64_t> served_stubs, yield_traps;
+	for (const auto &[stub, name] : served_names) {
 		served_stubs.push_back(stub);
+		yield_traps.push_back(stub + served_yield);
+	}
 	// A thread inside a commit prelude must not lose the processor between taking a log slot and filling it: the prelude counts as a
 	// served stub for the scheduler, in two pieces as it is longer than one.
 	for (const auto &[module_name, module] : modules.all())
@@ -2011,7 +2064,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	windows.set_deferred_tables(table + deferred_at, table + icons_at);
 	__atomic_store_n(&served_block[deferred_pointer / 8], table_guest + deferred_at, __ATOMIC_RELEASE);
 	__atomic_store_n(&served_block[icons_pointer / 8], table_guest + icons_at, __ATOMIC_RELEASE);
-	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, [&, served_names = std::move(served_names)](uint64_t stub) {
+	process.set_served_calls(served_block, std::move(served_stubs), served_trap, served_wait, std::move(yield_traps), [&, served_names = std::move(served_names)](uint64_t stub) {
 		const auto found = served_names.find(stub);
 		if (found == served_names.end())
 			throw std::runtime_error("a served call came from an unknown stub");
@@ -2303,8 +2356,19 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 			if (const auto explicit_file = explicit_files.find(identity); explicit_file != explicit_files.end()) {
 				bytes = ModuleBytes::map(explicit_file->second);
 				origin = explicit_file->second;
-			} else if (auto read = source(identity)) {
-				bytes.emplace(std::move(*read));
+			} else {
+				const auto system_names = system_library_names();
+				const bool system = std::find(system_names.begin(), system_names.end(), identity) != system_names.end();
+				if (!system && !activation_contexts().library_folder(identity)) {
+					if (const auto found = paths.find_library(launch->image_path, from_utf8(identity), true, flags)) {
+						bytes = ModuleBytes::map(found->host);
+						origin = found->host;
+					} else if (flags & 0x1f00) {
+						throw LoadFailure{126};
+					}
+				}
+				if (!bytes)
+					if (auto read = source(identity)) bytes.emplace(std::move(*read));
 			}
 			// A library loaded by path finds its dependencies in its own directory, as LOAD_WITH_ALTERED_SEARCH_PATH and a DLL directory
 			// set to that folder do on Windows; programs that unpack themselves to a temporary folder rely on it.
@@ -2355,8 +2419,9 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 				throw LoadFailure{120};
 			staged.reserve(staged.size() + 1);
 			// A library read as data takes a name of its own, so that nothing loaded later resolves imports through it.
-			auto &module = apart ? modules.add_data(identity + "#data" + std::to_string(++data_serial), std::move(*bytes)) :
-				modules.add(identity, std::move(*bytes));
+			const auto available = [&](uint64_t base, uint64_t size) { return process.memory_available(base, size); };
+			auto &module = apart ? modules.add_data(identity + "#data" + std::to_string(++data_serial), std::move(*bytes), available) :
+				modules.add(identity, std::move(*bytes), available);
 			if (apart)
 				apart_modules.insert(&module);
 			module.file = origin;
@@ -2564,6 +2629,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		threads.terminate_others(request.code);
 		try {
 			if (!cleanup_started && !request.terminated) {
+				kernel_ptr->shutdown_in_progress=true;
 				// Detaching counts as a load of this thread's own: a library that frees or loads another in its detach goes on at once
 				// instead of waiting for a load no other thread will finish.
 				cleanup_started=true; loading=true; loading_thread=threads.current_id();
@@ -2585,6 +2651,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 	try {
 		windows.set_call(invoke);
 		desktop.set_call(invoke);
+		wait_suspended_process(launch->suspended_fd, kernel_objects);
 		heap.initialize(invoke);
 		for (const auto *module : order) {
 			if (module == &entry)
@@ -2618,6 +2685,7 @@ NativeResult run_native_process(ModuleSet &modules, PEModule &entry,
 		if (result.stop != NativeStop::returned)
 			return result;
 		cleanup_started=true; loading=true;
+		kernel_ptr->shutdown_in_progress=true;
 		const auto tls_detach = notify_tls(entry, 0);
 		if (tls_detach.stop != NativeStop::returned)
 			return tls_detach;

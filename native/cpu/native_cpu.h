@@ -48,6 +48,12 @@ struct NativeThreadState {
 	size_t translated_depth = 0;
 	std::array<uint64_t, 4> translated_floats{};
 	uint64_t translated_result = 0;
+	pid_t task = 0;
+	bool stopped = true;
+	uint64_t served_guest = 0;
+	uint64_t *served_block = nullptr;
+	bool serving = false;
+	uint64_t served_stack = 0;
 };
 
 // Images must outlive this stopped/resumable x86-64 Linux process.
@@ -66,6 +72,7 @@ public:
 	std::vector<uint8_t> read_memory(uint64_t address, size_t size) const;
 	void write_memory(uint64_t address, std::span<const uint8_t> bytes);
 	void validate_write_memory(uint64_t address,size_t size) const;
+	uint64_t compare_exchange(uint64_t address, uint64_t expected, uint64_t desired, size_t size);
 	// Host primitives; Windows reservation/commit and PAGE_* semantics belong above this boundary.
 	uint64_t map_memory(size_t size, int protection, uint64_t address = 0);
 	void protect_memory(uint64_t address, size_t size, int protection);
@@ -76,6 +83,8 @@ public:
 	void unmap_memory(uint64_t address);
 	// Maps a host-owned memfd into the guest at a fresh address; release it with unmap_memory.
 	uint64_t map_shared(int descriptor, size_t size, uint64_t offset = 0);
+	// Transfers the same open file description, including device mapping permissions, instead of reopening it.
+	uint64_t map_descriptor(int descriptor, size_t size, uint64_t offset = 0);
 	bool memory_available(uint64_t address, size_t size) const;
 	void discard_memory(uint64_t address, size_t size);
 	// Dynamic image mappings share LoadedImage storage; the loader owns initialization and lifetime.
@@ -111,6 +120,13 @@ public:
 	void load_thread(const NativeThreadState &thread);
 	// A thread that has not started: no active call, its own stack ceiling and TEB (x64 GS base).
 	NativeThreadState new_thread(uint64_t stack_top, uint64_t teb);
+	bool parallel() const;
+	bool stopped() const;
+	int execution_descriptor() const;
+	void drain_execution();
+	void set_execution_wait(std::function<void(std::function<bool()>, std::chrono::steady_clock::time_point)> wait);
+	void stop_thread(const NativeThreadState &thread);
+	void pause_thread(NativeThreadState &thread);
 	// A fault stop becomes an API-style stop, so host code may run guest callbacks and redirect execution.
 	void enter_fault_dispatch();
 	// Continues the guest at a new context, dropping callbacks nested above depth (exception unwinding abandons them).
@@ -132,15 +148,19 @@ public:
 	// until the result is there. The handler runs while the guest waits, and answers through api_arguments, api_float_arguments and
 	// return_api as for a trap; it may only read and write guest memory. `stubs` are the addresses of the stubs, each `stub_size` bytes up
 	// to its fallback trap: no other thread is given the processor while one is inside a stub. A stub that has spun for a while without its
-	// answer stops at its breakpoint `wait_offset` bytes in; the call is answered there and the guest resumes after it.
+	// answer stops at its breakpoint `wait_offset` bytes in; the call is answered there and the guest resumes after it. The separate
+	// yield traps follow the last shared-block read, so their saved registers can survive another thread using the block.
 	void set_served_calls(uint64_t *block, std::vector<uint64_t> stubs, size_t stub_size, size_t wait_offset,
-		std::function<void(uint64_t stub)> handler);
+		std::vector<uint64_t> yield_traps, std::function<void(uint64_t stub)> handler);
 	// Runs before the guest runs again: before every resumption and before a served call is answered.
 	void set_resume_hook(std::function<void()> hook);
 	// Diagnostics: interrupts a guest that runs without stopping every `period` and reports where it was.
 	void set_guest_sampler(std::chrono::milliseconds period, std::function<void(uint64_t rip)> sampler);
 
 private:
+	void make_served_block(uint64_t teb, uint64_t &guest, uint64_t *&host);
+	uint64_t map_file(int descriptor, size_t size, uint64_t offset, bool transfer);
+	uint64_t receive_descriptor(int descriptor, uint64_t scratch);
 	void install_seccomp();
 	bool serve_pending();
 	bool inside_served_stub() const;

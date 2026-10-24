@@ -6,6 +6,7 @@
 #include "system_exports.h"
 
 #include <sys/random.h>
+#include <sys/sysinfo.h>
 #include "text.h"
 
 #include <algorithm>
@@ -233,6 +234,50 @@ void register_platform_api(ApiRegistry &registry, KernelContext &context)
 	// A clipboard listener is told when the clipboard changes; registering one succeeds, and a window not registered cannot be removed.
 	registry.add("AddClipboardFormatListener", 1, [](ApiCall &call) { call.ret(call[0] ? 1 : 0); });
 	registry.add("RemoveClipboardFormatListener", 1, [](ApiCall &call) { call.ret(call[0] ? 1 : 0); });
+
+	// A system library Raven serves from the host has no COM classes of its own to hand out, as Windows answers for one it does not know.
+	registry.add("DllGetClassObject", 3, [](ApiCall &call) {
+		if (call[2])
+			call.store_pointer(call[2], 0);
+		call.ret(0x80040111U);
+	});
+	registry.add("DllCanUnloadNow", 0, [](ApiCall &call) { call.ret(1); });
+
+	// The shell's desktop window belongs to Explorer, which does not run here; Windows answers no window without a shell.
+	registry.add("GetShellWindow", 0, [](ApiCall &call) { call.ret(0); });
+	// Synthesised input is refused, as User Interface Privilege Isolation refuses it for a window the caller may not drive. The window
+	// composition attributes (blur and accent effects behind a window) are accepted and drawn as an ordinary frame.
+	registry.add("SendInput", 3, [](ApiCall &call) { call.fail(5, 0); });
+	registry.add("SetWindowCompositionAttribute", 2, [](ApiCall &call) { call.ret(1); });
+	// PERFORMANCE_INFORMATION from the host's memory figures, in pages, with this process's handles and the host's process and thread counts.
+	for (const char *name : {"K32GetPerformanceInfo", "GetPerformanceInfo"})
+		registry.add(name, 2, [](ApiCall &call) {
+			const size_t width = call.pointer_width(), size = width == 8 ? 104 : 56;
+			if (!call[0] || call.u32(1) < size) {
+				call.fail(24, 0);
+				return;
+			}
+			struct sysinfo info {};
+			sysinfo(&info);
+			const uint64_t unit = info.mem_unit ? info.mem_unit : 1, page = 4096;
+			const uint64_t total = info.totalram * unit / page, available = (info.freeram + info.bufferram) * unit / page;
+			const uint64_t commit = total - available, limit = total + info.totalswap * unit / page;
+			std::vector<uint8_t> bytes(size, 0);
+			size_t at = 0;
+			const auto put = [&](uint64_t value, size_t field) {
+				std::memcpy(bytes.data() + at, &value, field);
+				at += field;
+			};
+			put(size, 4);
+			at = width == 8 ? 8 : 4;
+			for (const uint64_t value : {commit, limit, commit, total, available, info.bufferram * unit / page, uint64_t(0), uint64_t(0), uint64_t(0), page})
+				put(value, width);
+			put(256, 4);
+			put(info.procs, 4);
+			put(info.procs * 4u, 4);
+			call.write(call[0], bytes);
+			call.ret(1);
+		});
 
 	// mpr, the network provider router: the machine has no network drives or shares, so enumeration finds no network and a drive or
 	// path has no remote connection, the answers Windows gives on a machine that is not connected.

@@ -17,6 +17,47 @@ static int child(const WCHAR *digits)
 	return 1603;
 }
 
+static int search_directory(WCHAR *folder)
+{
+	WCHAR current[MAX_PATH], reported[MAX_PATH], expected[MAX_PATH], probe[MAX_PATH], cwd[MAX_PATH], excluded[MAX_PATH];
+	char ansi[MAX_PATH];
+	if (!GetCurrentDirectoryW(MAX_PATH,current)) return 30;
+	if (LoadLibraryW(L"module_plugin.dll") || GetLastError() != ERROR_MOD_NOT_FOUND) return 31;
+	if (!SetDllDirectoryW(folder)) return 32;
+	if (!SetDllDirectoryW(NULL) || LoadLibraryW(L"module_plugin.dll") || GetLastError() != ERROR_MOD_NOT_FOUND) return 35;
+	if (!SetDllDirectoryW(folder)) return 32;
+	HMODULE loaded = LoadLibraryW(L"MODULE_PLUGIN.DLL");
+	lstrcpyW(expected,folder);
+	lstrcatW(expected,L"\\module_plugin.dll");
+	if (!loaded || !GetModuleFileNameW(loaded,reported,MAX_PATH) || lstrcmpiW(reported,expected)) return 33;
+	int (*answer)(void) = (int (*)(void))GetProcAddress(loaded,"plugin_answer");
+	if (!answer || answer() != 42 || !FreeLibrary(loaded)) return 34;
+	lstrcpyW(probe,folder); lstrcatW(probe,L"\\module_probe.dll");
+	lstrcpyW(cwd,folder); lstrcatW(cwd,L"\\module_cwd.dll");
+	lstrcpyW(excluded,folder); lstrcatW(excluded,L"\\module_excluded.dll");
+	if (!CopyFileW(expected,probe,FALSE) || !CopyFileW(expected,cwd,FALSE) || !CopyFileW(expected,excluded,FALSE)) return 47;
+	unsigned i = 0;
+	for (; folder[i] && i < MAX_PATH-1; ++i) {
+		if (folder[i] > 127) return 36;
+		ansi[i] = (char)folder[i];
+	}
+	ansi[i] = 0;
+	if (!SetDllDirectoryA(ansi)) return 37;
+	if (LoadLibraryExW(L"module_probe.dll",NULL,LOAD_LIBRARY_SEARCH_SYSTEM32) || GetLastError() != ERROR_MOD_NOT_FOUND) return 38;
+	loaded = LoadLibraryExW(L"module_probe.dll",NULL,LOAD_LIBRARY_SEARCH_USER_DIRS);
+	if (!loaded || !FreeLibrary(loaded)) return 39;
+	if (!SetCurrentDirectoryW(folder) || !SetDllDirectoryA("")) return 40;
+	if (LoadLibraryW(L"module_cwd.dll") || GetLastError() != ERROR_MOD_NOT_FOUND) return 41;
+	if (!SetDllDirectoryA(NULL)) return 42;
+	loaded = LoadLibraryW(L"module_cwd.dll");
+	if (!loaded || !FreeLibrary(loaded)) return 43;
+	if (!SetDllDirectoryW(L"")) return 44;
+	if (LoadLibraryW(L"module_excluded.dll") || GetLastError() != ERROR_MOD_NOT_FOUND) return 45;
+	if (!SetDllDirectoryW(NULL) || !SetCurrentDirectoryW(current)) return 46;
+	if (!DeleteFileW(probe) || !DeleteFileW(cwd) || !DeleteFileW(excluded)) return 48;
+	return 0;
+}
+
 int raven_entry(void)
 {
 	WCHAR self[MAX_PATH], path[MAX_PATH], reported[MAX_PATH], command[MAX_PATH + 64];
@@ -31,6 +72,9 @@ int raven_entry(void)
 	for (WCHAR *at = path; *at; ++at)
 		if (*at == L'\\')
 			slash = at;
+	lstrcpyW(slash + 1, L"plugins");
+	int search = search_directory(path);
+	if (search) return search;
 	lstrcpyW(slash + 1, L"plugins\\module_plugin.dll");
 	HMODULE plugin = LoadLibraryW(path);
 	if (!plugin)

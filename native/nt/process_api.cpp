@@ -158,6 +158,7 @@ std::string format_guest(ApiCall &call, uint64_t format, uint64_t arguments)
 
 void register_process_api(ApiRegistry &registry, KernelContext &context)
 {
+	registry.add("RtlDllShutdownInProgress", 0, [&context](ApiCall &call) { call.ret(context.shutdown_in_progress); });
 	// _vsnprintf(buffer, count, format, arguments): at most count characters; -1 when the text did not fit, with count of it written.
 	registry.add("_vsnprintf", 4, [](ApiCall &call) {
 		const auto text = format_guest(call, call[2], call[3]);
@@ -272,65 +273,6 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 		}
 	};
 	const std::string windows = "C:\\Windows", system = "C:\\Windows\\System32", wow64 = "C:\\Windows\\SysWOW64";
-	// Access tokens: the program's own token exists and closes like a handle; no privilege is held, and files carry no access control lists.
-	registry.add("OpenProcessToken", 3, [&context](ApiCall &call) {
-		// Every process of the runtime runs as the same host user, so the token of a child or of another instance is this process's own.
-		const auto other = context.objects.object_as<ProcessObject>(call[0]);
-		if (int64_t(call[0]) != -1 && !context.objects.object_as<SelfProcessObject>(call[0]) && !(other && !other->exited())) {
-			call.fail(6);
-			return;
-		}
-		if (!call[2]) {
-			call.fail(87);
-			return;
-		}
-		const auto made = context.objects.add_object(std::make_shared<AccessToken>());
-		if (made.status) {
-			call.fail(made.status);
-			return;
-		}
-		call.store_pointer(call[2], made.value);
-		call.ret(1);
-	});
-	// Impersonation: a thread that impersonates has a token of its own, which is the process's identity again, since every process runs as
-	// the same host user. Threads that do not impersonate have none, and OpenThreadToken tells them ERROR_NO_TOKEN.
-	const auto impersonating = std::make_shared<std::set<uint32_t>>();
-	registry.add("ImpersonateSelf", 1, [impersonating](ApiCall &call) {
-		impersonating->insert(call.environment.thread_id());
-		call.ret(1);
-	});
-	registry.add("ImpersonateLoggedOnUser", 1, [impersonating](ApiCall &call) {
-		impersonating->insert(call.environment.thread_id());
-		call.ret(1);
-	});
-	registry.add("RevertToSelf", 0, [impersonating](ApiCall &call) {
-		impersonating->erase(call.environment.thread_id());
-		call.ret(1);
-	});
-	registry.add("SetThreadToken", 2, [impersonating](ApiCall &call) {
-		if (call[1])
-			impersonating->insert(call.environment.thread_id());
-		else
-			impersonating->erase(call.environment.thread_id());
-		call.ret(1);
-	});
-	registry.add("OpenThreadToken", 4, [&context, impersonating](ApiCall &call) {
-		if (!call[3]) {
-			call.fail(87);
-			return;
-		}
-		if (!impersonating->contains(call.environment.thread_id())) {
-			call.fail(1008);
-			return;
-		}
-		const auto made = context.objects.add_object(std::make_shared<AccessToken>());
-		if (made.status) {
-			call.fail(made.status);
-			return;
-		}
-		call.store_pointer(call[3], made.value);
-		call.ret(1);
-	});
 	const auto lookup_privilege = [](ApiCall &call, bool wide) {
 		static const std::pair<std::u16string_view, uint32_t> privileges[] = {
 			{u"SeCreateTokenPrivilege", 2}, {u"SeAssignPrimaryTokenPrivilege", 3}, {u"SeLockMemoryPrivilege", 4}, {u"SeIncreaseQuotaPrivilege", 5},
@@ -359,15 +301,42 @@ void register_process_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("LookupPrivilegeValueW", 3, [lookup_privilege](ApiCall &call) { lookup_privilege(call, true); });
 	registry.add("LookupPrivilegeValueA", 3, [lookup_privilege](ApiCall &call) { lookup_privilege(call, false); });
 	registry.add("AdjustTokenPrivileges", 6, [&context](ApiCall &call) {
-		if (!context.objects.object_as<AccessToken>(call[0])) {
+		const auto token = context.objects.object_as<AccessToken>(call[0]);
+		if (!token) {
 			call.fail(6);
 			return;
 		}
-		// Nothing is held to enable: with a change requested, the call succeeds but reports that not every privilege was assigned.
-		if (call[5]) call.store<uint32_t>(call[5], 0);
-		const bool change = call[2] && call.load<uint32_t>(call[2]) != 0;
-		call.set_last_error(change && call.u32(1) == 0 ? 1300 : 0);
-		call.ret(1);
+		const uint32_t required = 0x20 | (call[4] ? 8 : 0);
+		if ((context.objects.access_of(call[0]) & required) != required) { call.fail(5); return; }
+		std::vector<AccessToken::Privilege> changes;
+		if (!call.u32(1) && call[2]) {
+			const auto count = call.load<uint32_t>(call[2]);
+			if (count > 1024) { call.fail(87); return; }
+			const auto entries = call.read(call[2] + 4, size_t(count) * 12);
+			for (uint32_t index = 0; index < count; ++index) {
+				AccessToken::Privilege entry;
+				std::memcpy(&entry.luid, entries.data() + 12 * index, 8);
+				std::memcpy(&entry.attributes, entries.data() + 12 * index + 8, 4);
+				changes.push_back(entry);
+			}
+		}
+		const auto error = token->adjust_privileges(call.u32(1) != 0, changes, [&](std::span<const AccessToken::Privilege> previous) -> uint32_t {
+			if (!call[4]) return 0;
+			const uint32_t size = uint32_t(4 + 12 * previous.size());
+			if (call[5]) call.store<uint32_t>(call[5], size);
+			if (call.u32(3) < size) return 122;
+			std::vector<uint8_t> data(size);
+			const uint32_t count = uint32_t(previous.size());
+			std::memcpy(data.data(), &count, 4);
+			for (size_t index = 0; index < previous.size(); ++index) {
+				std::memcpy(data.data() + 4 + 12 * index, &previous[index].luid, 8);
+				std::memcpy(data.data() + 12 + 12 * index, &previous[index].attributes, 4);
+			}
+			call.write(call[4], data);
+			return 0;
+		});
+		call.set_last_error(error);
+		call.ret(error == 0 || error == 1300);
 	});
 	registry.add("SetFileSecurityW", 3, [&context](ApiCall &call) {
 		const auto resolved = context.paths.resolve(call.wide(call[0]));

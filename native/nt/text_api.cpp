@@ -643,19 +643,49 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(1);
 	});
 
-	registry.add("GetCPInfo", 2, [](ApiCall &call) {
-		const uint32_t page = call.u32(0);
-		if (page != 0 && page != 1 && page != 437 && page != 850 && page != 1252 && page != 28591 && page != 20127 && page != 65001) {
+	struct CodePage { uint32_t id, maximum; const char *name; };
+	static constexpr CodePage code_pages[] = {
+		{437, 1, "OEM United States"}, {850, 1, "OEM Multilingual Latin 1"}, {1252, 1, "Western European (Windows)"},
+		{28591, 1, "Western European (ISO)"}, {20127, 1, "US-ASCII"}, {65001, 4, "Unicode (UTF-8)"}
+	};
+	const auto code_page = [](uint32_t page) -> const CodePage * {
+		if (page == 0 || page == 3) page = 1252;
+		if (page == 1) page = 437;
+		for (const auto &entry : code_pages)
+			if (entry.id == page) return &entry;
+		return nullptr;
+	};
+	registry.add("GetCPInfo", 2, [code_page](ApiCall &call) {
+		const auto page = code_page(call.u32(0));
+		if (!page || !call[1]) {
 			call.fail(87);
 			return;
 		}
 		std::vector<uint8_t> bytes(20);
-		const uint32_t maximum = page == 65001 ? 4 : 1;
-		std::memcpy(bytes.data(), &maximum, 4);
+		std::memcpy(bytes.data(), &page->maximum, 4);
 		bytes[4] = '?';
 		call.write(call[1], bytes);
 		call.ret(1);
 	});
+	for (const auto suffix : {std::string("A"), std::string("W")}) {
+		registry.add("GetCPInfoEx" + suffix, 3, [code_page, suffix](ApiCall &call) {
+			const auto page = code_page(call.u32(0));
+			if (!page || call.u32(1) || !call[2]) {
+				call.fail(87);
+				return;
+			}
+			const size_t width = suffix == "W" ? 2 : 1;
+			std::vector<uint8_t> bytes(24 + 260 * width);
+			std::memcpy(bytes.data(), &page->maximum, 4);
+			bytes[4] = '?';
+			bytes[18] = '?';
+			std::memcpy(bytes.data() + 20, &page->id, 4);
+			for (size_t index = 0; page->name[index]; ++index)
+				bytes[24 + index * width] = uint8_t(page->name[index]);
+			call.write(call[2], bytes);
+			call.ret(1);
+		});
+	}
 	registry.add("IsValidCodePage", 1, [](ApiCall &call) {
 		const uint32_t page = call.u32(0);
 		call.ret(page == 437 || page == 850 || page == 1252 || page == 28591 || page == 20127 || page == 65001 || page == 1200 || page == 1201);
@@ -686,6 +716,9 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		call.ret(locale == 0 || locale == 0x400 || locale == 0x800 ? 0x409 : (locale & 0xfc00) ? locale : locale | 0x400);
 	});
 	registry.add("IsValidLocale", 2, [](ApiCall &call) { call.ret(call.u32(0) == 0x409 || call.u32(0) == 0x400 || call.u32(0) == 0x800); });
+	registry.add("IsValidLocaleName", 1, [](ApiCall &call) {
+		call.ret(call[0] && compare_fold(call.wide(call[0], 85), u"en-US") == 0);
+	});
 	const auto locale_name = [](ApiCall &call, uint64_t buffer, int32_t capacity) {
 		const std::u16string name = u"en-US";
 		if (capacity && size_t(capacity) <= name.size()) {
@@ -901,6 +934,23 @@ void register_text_api(ApiRegistry &registry, KernelContext &context)
 		memory.free(scratch.address, 0, 0x8000);
 		call.ret(1);
 	};
+	registry.add("EnumSystemLocalesEx", 4, [enumerate](ApiCall &call) {
+		if (!call[0] || call[3]) {
+			call.fail(87);
+			return;
+		}
+		const uint32_t flags = call.u32(1);
+		if (flags & ~0x3fU) {
+			call.fail(1004);
+			return;
+		}
+		// The locale data above contains en-US only: a built-in specific locale, without custom or alternate-sort data.
+		if (((flags & 0xf) && !(flags & 1)) || ((flags & 0x30) && !(flags & 0x20))) {
+			call.ret(1);
+			return;
+		}
+		enumerate(call, call[0], {u"en-US"}, {0x21, call[2]});
+	});
 	// EnumTimeFormatsEx(routine, locale, flags, parameter): the long time formats, or without seconds (TIME_NOSECONDS) the short ones.
 	registry.add("EnumTimeFormatsEx", 4, [enumerate](ApiCall &call) {
 		if (!call[0]) {

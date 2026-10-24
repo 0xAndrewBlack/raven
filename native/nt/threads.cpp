@@ -49,6 +49,12 @@ NativeThreads::NativeThreads(NativeProcess &process, NativeEnvironment &environm
 	if (wake < 0)
 		throw std::runtime_error("cannot create the scheduler's wake descriptor");
 	shared_change_listener = wake;
+	if (process.parallel()) {
+		process.set_execution_wait([this](std::function<bool()> ready, std::chrono::steady_clock::time_point limit) {
+			while (!ready() && std::chrono::steady_clock::now() < limit)
+				block(ready, limit);
+		});
+	}
 }
 
 NativeThreads::~NativeThreads()
@@ -61,6 +67,7 @@ NativeThreads::~NativeThreads()
 		unwind_all();
 	} catch (...) {
 	}
+	process.set_execution_wait(nullptr);
 	::close(wake);
 }
 
@@ -72,6 +79,15 @@ void NativeThreads::stop_time_slicing()
 size_t NativeThreads::live() const
 {
 	return size_t(std::count_if(threads.begin(), threads.end(), [](const auto &thread) { return thread->state != GuestThread::State::done; }));
+}
+
+std::vector<uint32_t> NativeThreads::thread_ids() const
+{
+	std::vector<uint32_t> result;
+	for (const auto &thread : threads)
+		if (thread->state != GuestThread::State::done)
+			result.push_back(thread->id);
+	return result;
 }
 
 std::vector<uint64_t> NativeThreads::thread_blocks() const
@@ -93,6 +109,8 @@ std::shared_ptr<GuestThread> NativeThreads::find(uint32_t id) const
 
 std::shared_ptr<GuestThread> NativeThreads::create(uint64_t start, uint64_t parameter, uint64_t stack_size, bool suspended)
 {
+	if (process.parallel())
+		reap();
 	if (live() >= 256)
 		throw std::runtime_error("native guest thread limit reached");
 	auto thread = std::make_shared<GuestThread>();
@@ -199,8 +217,13 @@ void NativeThreads::thread_main(GuestThread &thread)
 
 void NativeThreads::finish(GuestThread &thread, uint32_t code)
 {
+	if (&thread != running) {
+		process.stop_thread(thread.snapshot);
+		thread.snapshot.task = 0;
+	}
 	thread.exit_code = code;
 	thread.state = GuestThread::State::done;
+	thread.impersonation.reset();
 	thread.ready = nullptr;
 	for (const int report : thread.exit_reports) {
 		[[maybe_unused]] const auto written = ::write(report, &code, sizeof code);
@@ -249,6 +272,12 @@ void NativeThreads::release_resources(GuestThread &thread)
 {
 	if (thread.main || !thread.teb)
 		return;
+	process.stop_thread(thread.snapshot);
+	if (thread.snapshot.served_guest) {
+		process.unmap_memory(thread.snapshot.served_guest);
+		thread.snapshot.served_guest = 0;
+		thread.snapshot.served_block = nullptr;
+	}
 	if (tls)
 		tls->release_thread(thread.teb);
 	if (block_released)
@@ -320,7 +349,8 @@ void NativeThreads::switch_to(GuestThread &next)
 	active_scheduler = this;
 	swapcontext(&previous.context, &next.context);
 	// Resumed: whoever switched back already loaded this thread's guest state.
-	reap();
+	if (process.stopped())
+		reap();
 	if (running->unwinding && !running->main)
 		throw ThreadExit{0};
 	check_pending();
@@ -379,12 +409,15 @@ void NativeThreads::schedule()
 			poll(std::chrono::ceil<std::chrono::milliseconds>(slice));
 		} else if (slice.count() > 0) {
 			std::vector<pollfd> descriptors{{this->wake, POLLIN, 0}};
+			if (process.execution_descriptor() >= 0)
+				descriptors.push_back({process.execution_descriptor(), POLLIN, 0});
 			if (watched)
 				watched(descriptors);
 			const timespec timeout{slice.count() / 1000000000, slice.count() % 1000000000};
 			::ppoll(descriptors.data(), descriptors.size(), &timeout, nullptr);
 			uint64_t drained = 0;
 			while (::read(this->wake, &drained, sizeof drained) > 0) {}
+			process.drain_execution();
 		}
 	}
 }
@@ -407,6 +440,8 @@ std::chrono::steady_clock::time_point NativeThreads::idle_until(std::chrono::ste
 void NativeThreads::idle_descriptors(std::vector<pollfd> &descriptors) const
 {
 	descriptors.push_back({wake, POLLIN, 0});
+	if (process.execution_descriptor() >= 0)
+		descriptors.push_back({process.execution_descriptor(), POLLIN, 0});
 	if (watched)
 		watched(descriptors);
 }
@@ -415,6 +450,7 @@ void NativeThreads::drain_wake()
 {
 	uint64_t drained = 0;
 	while (::read(wake, &drained, sizeof drained) > 0) {}
+	process.drain_execution();
 }
 
 void NativeThreads::nudge()
@@ -519,6 +555,18 @@ void NativeThreads::resume(GuestThread &thread)
 {
 	if (thread.suspend_count > 0)
 		--thread.suspend_count;
+}
+
+uint32_t NativeThreads::suspend(GuestThread &thread)
+{
+	if (thread.state == GuestThread::State::done)
+		return UINT32_MAX;
+	if (&thread != running)
+		process.pause_thread(thread.snapshot);
+	const uint32_t previous = thread.suspend_count++;
+	if (&thread == running)
+		block([&thread] { return thread.suspend_count == 0; }, std::nullopt);
+	return previous;
 }
 
 }

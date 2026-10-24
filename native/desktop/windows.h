@@ -100,8 +100,8 @@ public:
 	// Whether a message, paint request or due timer waits for the guest; host input is delivered to the windows on the way, so this
 	// runs only inside a call of the guest thread.
 	bool input_ready();
-	// The same question for a waiting thread's condition: host input is only collected, and no window procedure runs.
-	bool input_pending(uint32_t thread);
+	// Queue categories in the high word, new categories in the low word; safe in a waiting thread's condition.
+	uint32_t queue_status(uint32_t thread,uint32_t mask,bool clear);
 	void dump_windows();
 	void shutdown();
 
@@ -118,12 +118,18 @@ private:
 		uint32_t character=0;
 		// The guest thread whose queue holds the message; zero for one any thread may take.
 		uint32_t thread=0;
+		uint32_t kinds=0x108;
 	};
 	// The posted messages of every guest thread, each marked with the thread that owns it; HWNDs and drawing resources stay in
 	// DesktopObjects.
 	std::deque<Message> messages;
 	// Queues a message for the thread that owns its window (the calling thread for a message to no window).
-	void queue(Message message);
+	void queue(Message message,uint32_t kinds=0x108);
+	struct QueueState {
+		uint32_t current=0,changed=0;
+		std::map<uint64_t,uint64_t> paints;
+	};
+	std::map<uint32_t,QueueState> queues;
 	uint32_t owner(uint64_t window) const;
 	bool queued_for(uint32_t thread) const;
 	// A message sent to a window of another thread waits here until that thread retrieves messages; the sender waits for the result.

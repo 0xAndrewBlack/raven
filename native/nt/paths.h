@@ -17,6 +17,8 @@ public:
 	const std::u16string &current() const { return directory; }
 	// The directory must exist; the stored form is a full path without a trailing separator (except for roots).
 	bool set_current(std::u16string_view path);
+	bool set_dll_directory(std::optional<std::u16string> path);
+	const std::optional<std::u16string> &dll_directory() const { return dll_folder; }
 	// Full drive-qualified path without "." or ".." parts and with backslashes; empty when the text is not a path.
 	std::u16string full(std::u16string_view path) const;
 	struct Resolved {
@@ -37,6 +39,7 @@ public:
 	static std::u16string system_directory(bool wide) { return wide ? u"C:\\Windows\\System32" : u"C:\\Windows\\SysWOW64"; }
 	// The file a library loaded by name came from, in the loader's search order: beside the program, then in the system directory.
 	std::u16string library_location(std::u16string_view image_path, std::u16string_view name, bool wide) const;
+	std::optional<Resolved> find_library(std::u16string_view image_path, std::u16string_view name, bool wide, uint32_t flags = 0) const;
 	// A 32-bit program sees SysWOW64 where it names System32, and System32 where it names Sysnative, while redirection is on.
 	void set_wow64(bool enabled) { wow64 = enabled; }
 	// Turns redirection on or off and tells whether it was on.
@@ -47,6 +50,7 @@ public:
 private:
 	const NativePrefix &prefix;
 	std::u16string directory;
+	std::optional<std::u16string> dll_folder;
 	bool wow64 = false, redirecting = true;
 	std::optional<std::filesystem::path> drive_root(char16_t letter) const;
 	std::u16string redirected(std::u16string path) const;

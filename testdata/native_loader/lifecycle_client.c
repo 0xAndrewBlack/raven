@@ -4,6 +4,7 @@
 __declspec(dllimport) unsigned int Query(void);
 __declspec(dllimport) unsigned int DependentState(void);
 __declspec(dllexport) unsigned int entered;
+__declspec(dllexport) unsigned int exit_requested;
 
 static unsigned int verify_list(LIST_ENTRY *head, unsigned int member, unsigned int *found)
 {
@@ -45,5 +46,9 @@ unsigned int raven_entry(void)
 	unsigned int load_count = verify_list((LIST_ENTRY *)((unsigned char *)loader + 0x10), 0, &found);
 	unsigned int memory_count = verify_list(&loader->InMemoryOrderModuleList, 0x10, &found);
 	unsigned int init_count = verify_list((LIST_ENTRY *)((unsigned char *)loader + 0x30), 0x20, &found);
-	return load_count >= 4 && memory_count == load_count && init_count == load_count - 1 && found == 3 ? 0 : 2;
+	if (load_count < 4 || memory_count != load_count || init_count != load_count - 1 || found != 3)
+		return 2;
+	if (exit_requested)
+		ExitProcess(0);
+	return 0;
 }

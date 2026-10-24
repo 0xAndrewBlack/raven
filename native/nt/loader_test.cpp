@@ -146,10 +146,11 @@ int main(int argc, char **argv)
 			throw std::runtime_error("bootstrap and lifecycle fixture directory required");
 		const std::filesystem::path directory(argv[2]);
 		dynamic_lists(directory, argv[1]);
-		for (const std::string extra : {"", "reject.dll", "fault.dll", "loop.dll"}) {
+		for (const std::string extra : {"", "exit", "reject.dll", "fault.dll", "loop.dll"}) {
+			const bool explicit_exit = extra == "exit";
 			raven::ModuleSet modules;
 			raven::PEModule *entry = nullptr;
-			for (const std::string name : std::vector<std::string>{"client.exe", "dependent.dll", "base.dll", extra}) {
+			for (const std::string name : std::vector<std::string>{"client.exe", "dependent.dll", "base.dll", explicit_exit ? "" : extra}) {
 				if (name.empty())
 					continue;
 				auto bytes = read_file(directory / name);
@@ -158,19 +159,26 @@ int main(int argc, char **argv)
 				if (!entry)
 					entry = &module;
 			}
+			if (explicit_exit) {
+				const auto address = modules.resolve({"client.exe", "exit_requested", 0, false, 0});
+				entry->loaded.data()[address - entry->loaded.base()] = 1;
+			}
 			const auto timeout = std::chrono::milliseconds(extra == "loop.dll" ? 300 : 10000);
 			if (extra == "reject.dll") {
 				bool rejected = false;
 				try { raven::run_native_process(modules, *entry, argv[1], timeout); }
 				catch (const std::runtime_error &error) { rejected = std::string(error.what()) == "DLL_PROCESS_ATTACH failed: reject.dll"; }
 				check(rejected, "failed DLL attach did not abort startup");
+				check(field(modules, "base.dll", "shutdown_state") == 0, "DLL attach rollback observed process shutdown");
 				check(field(modules, "base.dll", "base_state") == 1125634 &&
 					field(modules, "dependent.dll", "dependent_state") == 210 &&
 					field(modules, "reject.dll", "reject_state") == 510, "DLL failure rollback order or reserved argument differs");
 			} else {
 				const auto result = raven::run_native_process(modules, *entry, argv[1], timeout);
-				if (extra.empty()) {
-					check(result.stop == raven::NativeStop::returned && result.value == 0, "DLL attach order failed the executable workflow");
+				if (extra.empty() || explicit_exit) {
+					check(result.stop == (explicit_exit ? raven::NativeStop::exited : raven::NativeStop::returned) && result.value == 0,
+						"DLL attach order failed the executable workflow");
+					check(field(modules, "base.dll", "shutdown_state") == 1, "DLL process detach did not observe shutdown");
 					check(field(modules, "base.dll", "base_state") == 11234 &&
 						field(modules, "dependent.dll", "dependent_state") == 210, "DLL process detach order differs");
 					auto &base = *modules.all().at("base.dll");
@@ -198,7 +206,7 @@ int main(int argc, char **argv)
 					check(field(modules, "base.dll", "base_state") == 1125, "DLL fault/timeout ran extra guest cleanup code");
 				}
 			}
-			check(field(modules, "client.exe", "entered") == (extra.empty() ? 1U : 0U), "executable entry ran after DLL initialization failed");
+			check(field(modules, "client.exe", "entered") == (extra.empty() || explicit_exit ? 1U : 0U), "executable entry ran after DLL initialization failed");
 		}
 		std::cout << "Compiled DLL dependency attach, reverse detach, rejected attach rollback, fault/timeout and blocked EXE entry passed\n";
 		return 0;

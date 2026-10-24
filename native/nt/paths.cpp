@@ -198,6 +198,42 @@ std::optional<NativePaths::Resolved> NativePaths::resolve(std::u16string_view in
 	return result;
 }
 
+bool NativePaths::set_dll_directory(std::optional<std::u16string> path)
+{
+	if (path && !path->empty()) {
+		*path = full(*path);
+		if (path->empty()) return false;
+	}
+	dll_folder = std::move(path);
+	return true;
+}
+
+std::optional<NativePaths::Resolved> NativePaths::find_library(std::u16string_view image_path, std::u16string_view name,
+	bool wide, uint32_t flags) const
+{
+	if (name.find_first_of(u"/\\:") != name.npos)
+		return resolve(name);
+	const auto program = full(image_path);
+	const auto application = program.substr(0, program.find_last_of(u'\\'));
+	uint32_t search = flags & 0x1f00;
+	if (search & 0x1000) search |= 0xe00;
+	std::vector<std::u16string> folders;
+	if (!search || (search & 0x200)) folders.push_back(application);
+	if ((!search || (search & 0x400)) && dll_folder && !dll_folder->empty()) folders.push_back(*dll_folder);
+	if (!search || (search & 0x800)) folders.push_back(system_directory(wide));
+	if (!search) {
+		folders.push_back(u"C:\\Windows\\System");
+		folders.push_back(u"C:\\Windows");
+		if (!dll_folder) folders.push_back(directory);
+	}
+	for (const auto &folder : folders) {
+		const auto found = resolve(folder + u"\\" + std::u16string(name));
+		std::error_code error;
+		if (found && found->exists && std::filesystem::is_regular_file(found->host, error)) return found;
+	}
+	return std::nullopt;
+}
+
 std::u16string NativePaths::library_location(std::u16string_view image_path, std::u16string_view name, bool wide) const
 {
 	// The runtime's components stand where Windows keeps them, in the system directory, whatever folder serves them here.
@@ -209,6 +245,8 @@ std::u16string NativePaths::library_location(std::u16string_view image_path, std
 	// A library a side-by-side assembly of the program's context declares comes from the assembly's folder.
 	if (const auto folder = activation_contexts().library_folder(lower))
 		return dos(*folder) + u"\\" + std::u16string(name);
+	if (const auto found = find_library(image_path, name, wide))
+		return dos(found->host);
 	const auto program = full(image_path);
 	auto beside = program.substr(0, program.find_last_of(u'\\') + 1);
 	beside += name;

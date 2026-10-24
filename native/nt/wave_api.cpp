@@ -254,6 +254,22 @@ void register_wave_api(ApiRegistry &registry, KernelContext &context)
 	registry.add("waveOutGetNumDevs", 0, [](ApiCall &call) { call.ret(1); });
 	// There is no capture device: recording programs hear that none exists.
 	registry.add("waveInGetNumDevs", 0, [](ApiCall &call) { call.ret(0); });
+	// There is no capture device and no mixer: their calls report a bad device or no driver, as Windows does on such a machine.
+	registry.add("waveInMessage", 4, [](ApiCall &call) { call.ret(2); });
+	registry.add("waveInOpen", 6, [](ApiCall &call) {
+		if (call[0])
+			call.store_pointer(call[0], 0);
+		call.ret(2);
+	});
+	for (const char *name : {"waveInClose", "waveInStart", "waveInStop", "waveInReset"})
+		registry.add(name, 1, [](ApiCall &call) { call.ret(5); });
+	registry.add("mixerGetNumDevs", 0, [](ApiCall &call) { call.ret(0); });
+	registry.add("mixerOpen", 5, [](ApiCall &call) {
+		if (call[0])
+			call.store_pointer(call[0], 0);
+		call.ret(6);
+	});
+	registry.add("mixerGetID", 3, [](ApiCall &call) { call.ret(6); });
 	for (const auto *name : {"waveInGetDevCapsW", "waveInGetDevCapsA"})
 		registry.add(name, 3, [](ApiCall &call) { call.ret(mmsyserr_baddeviceid); });
 	for (const bool wide : {true, false})

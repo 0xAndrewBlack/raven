@@ -37,8 +37,12 @@ int main(int argc, char **argv)
 		};
 		uint32_t version = 0;
 		check(vkEnumerateInstanceVersion(&version) == VK_SUCCESS && version == field.template operator()<uint32_t>("loader_version"), "guest loader version differs from host");
+		VkApplicationInfo application{};
+		application.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+		application.apiVersion = VK_API_VERSION_1_1;
 		VkInstanceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+		info.pApplicationInfo = &application;
 		VkInstance reference = VK_NULL_HANDLE;
 		check(vkCreateInstance(&info, nullptr, &reference) == VK_SUCCESS, "host reference instance failed");
 		VkPhysicalDeviceProperties expected{};
@@ -103,6 +107,7 @@ int main(int argc, char **argv)
 			VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &host_properties12};
 			VkInstanceCreateInfo reference_info{};
 			reference_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+			reference_info.pApplicationInfo = &application;
 			VkInstance query_instance = VK_NULL_HANDLE;
 			check(vkCreateInstance(&reference_info, nullptr, &query_instance) == VK_SUCCESS, "host query instance failed");
 			uint32_t query_count = 1;
@@ -227,6 +232,10 @@ int main(int argc, char **argv)
 		rejected("vkCmdSetViewport", forged_viewport);
 		const uint64_t forged_features2[] = {0x1234, memory};
 		rejected("vkGetPhysicalDeviceFeatures2", forged_features2);
+		const uint64_t forged_query[] = {0x1234, memory, memory};
+		for (const char *name : {"vkGetPhysicalDeviceFeatures2KHR", "vkGetPhysicalDeviceProperties2KHR", "vkGetPhysicalDeviceMemoryProperties2KHR",
+			"vkGetPhysicalDeviceFormatProperties2KHR", "vkGetPhysicalDeviceQueueFamilyProperties2KHR"})
+			rejected(name, forged_query);
 		const uint64_t forged_extensions[] = {0x1234, 0, memory, 0};
 		rejected("vkEnumerateDeviceExtensionProperties", forged_extensions);
 		const uint64_t forged_format[] = {0x1234, 37, memory};

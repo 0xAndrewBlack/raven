@@ -80,8 +80,22 @@ int raven_entry(void)
 	CHECK(17,(GetFileAttributesW(path)&FILE_ATTRIBUTE_DIRECTORY)==0);
 
 	join(copy,work,L"copy.txt");
+	const FILETIME written={0x89abcdef,0x01d00000};
+	file=CreateFileW(path,GENERIC_WRITE,0,0,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0);
+	CHECK(37,file!=INVALID_HANDLE_VALUE && SetFileTime(file,0,0,&written) && CloseHandle(file));
 	CHECK(18,CopyFileW(path,copy,TRUE));
+	WIN32_FILE_ATTRIBUTE_DATA copied;
+	CHECK(38,GetFileAttributesExW(copy,GetFileExInfoStandard,&copied));
+	CHECK(39,copied.ftLastWriteTime.dwLowDateTime==written.dwLowDateTime &&
+		copied.ftLastWriteTime.dwHighDateTime==written.dwHighDateTime);
 	CHECK(19,!CopyFileW(path,copy,TRUE) && GetLastError()==ERROR_FILE_EXISTS);
+	const FILETIME changed={0x12345678,0x01d10000};
+	file=CreateFileW(copy,GENERIC_WRITE,0,0,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0);
+	CHECK(40,file!=INVALID_HANDLE_VALUE && SetFileTime(file,0,0,&changed) && CloseHandle(file));
+	CHECK(41,CopyFileExW(path,copy,0,0,0,0));
+	CHECK(42,GetFileAttributesExW(copy,GetFileExInfoStandard,&copied) &&
+		copied.ftLastWriteTime.dwLowDateTime==written.dwLowDateTime &&
+		copied.ftLastWriteTime.dwHighDateTime==written.dwHighDateTime);
 	join(moved,work,L"moved.txt");
 	CHECK(20,MoveFileExW(copy,moved,0));
 	CHECK(21,GetFileAttributesW(copy)==INVALID_FILE_ATTRIBUTES && GetLastError()==ERROR_FILE_NOT_FOUND);

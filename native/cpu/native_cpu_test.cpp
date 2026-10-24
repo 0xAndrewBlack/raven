@@ -105,6 +105,16 @@ static void memory_contracts(const std::string &bootstrap)
 		check(process.context().registers.rip == before.registers.rip, "failed allocation lost the stopped context");
 		const auto allocation = process.map_memory(12288, PROT_READ | PROT_WRITE, 0x190000000ULL);
 		check(allocation == 0x190000000ULL && process.read_memory(allocation, 12288) == std::vector<uint8_t>(12288), "dynamic mapping differs or is not zeroed");
+		const auto atomic = allocation + 8200;
+		check(process.compare_exchange(atomic, 0, 0x89abcdef, 4) == 0 && value(process.read_memory(atomic, 8)) == 0x89abcdef,
+			"32-bit atomic exchange changed adjacent bytes or returned the wrong value");
+		check(process.compare_exchange(atomic, 0, 7, 4) == 0x89abcdef && value(process.read_memory(atomic, 8)) == 0x89abcdef,
+			"failed atomic comparison changed the word");
+		check(process.compare_exchange(atomic, 0x89abcdef, 0x1122334455667788ULL, 8) == 0x89abcdef &&
+			value(process.read_memory(atomic, 8)) == 0x1122334455667788ULL, "64-bit atomic exchange truncated its operand");
+		rejected([&] { process.compare_exchange(atomic + 1, 0, 1, 4); });
+		rejected([&] { process.compare_exchange(atomic, 0, 1, 2); });
+		check(process.context().registers.rip == before.registers.rip, "atomic operation changed the caller's context");
 		std::vector<uint8_t> unaligned(8191);
 		for (size_t i = 0; i < unaligned.size(); ++i) unaligned[i] = static_cast<uint8_t>(i % 251);
 		process.write_memory(allocation + 1, unaligned);
@@ -121,6 +131,7 @@ static void memory_contracts(const std::string &bootstrap)
 		const std::vector<uint8_t> payload(12288, 0x5a);
 		process.write_memory(allocation, payload);
 		process.protect_memory(allocation + 4096, 4096, PROT_READ);
+		rejected([&] { process.compare_exchange(allocation + 4096, 0x5a5a5a5a, 1, 4); });
 		rejected([&] { process.write_memory(allocation + 4096, std::span<const uint8_t>(payload).first(1)); });
 		rejected([&] { process.write_memory(allocation + 4095, std::span<const uint8_t>(payload).first(2)); });
 		check(process.read_memory(allocation, payload.size()) == payload, "rejected cross-protection write changed memory");
@@ -635,8 +646,14 @@ static void persistent_contracts(const std::string &bootstrap)
 int main(int argc, char **argv)
 {
 	try {
-		check(argc == 2, "bootstrap path required");
+		check(argc == 2 || (argc == 3 && std::string(argv[2]) == "--memory"), "bootstrap path required");
 		const std::string bootstrap = argv[1];
+		if (argc == 3) {
+			memory_contracts(bootstrap);
+			no_children();
+			std::cout << "Native memory contracts passed\n";
+			return 0;
+		}
 		const auto run = [&](std::vector<uint8_t> &bytes, std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) {
 			const raven::PEImage image(bytes);
 			raven::LoadedImage loaded(image, image.image_base);
