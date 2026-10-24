@@ -20,8 +20,8 @@ The tested setup also uses libpng 1.6.59, a CPU build of Skia with the Liberatio
 Raven is built from source for now:
 
 ```sh
-git clone https://github.com/mirkobrombin/go-vm.git
-cd go-vm
+git clone https://github.com/mirkobrombin/raven.git
+cd raven
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j2
 ```
