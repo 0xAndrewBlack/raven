@@ -87,7 +87,15 @@ The same programs on the same machine, against Wine 11.0 and Soda 11.0-32-experi
 
 ![Direct3D 11 frame rate](docs/benchmark-frames.svg)
 
-![ClassiCube frame rate](docs/benchmark-games.svg)
+ClassiCube 1.3.8, fixed seed 1, four alternating rounds:
+
+| Runtime | Median FPS | Samples (FPS) |
+|---|---:|---|
+| Raven | 71.5 | 72, 73, 54, 71 |
+| Wine 11.0 | 63.0 | 65, 68, 61, 61 |
+| Soda 11.0-32 exp. | 63.0 | 64, 64, 61, 62 |
+
+These replace the earlier ClassiCube series; its scene configuration was not verified against the retained samples. Raven uses its default execution mode.
 
 | Component | Value |
 |---|---|
@@ -102,7 +110,7 @@ The workloads: a program that exits at once, a SQLite query over eight million r
 
 Every runtime starts from a copy of a prefix it initialised beforehand. Each workload runs three times and the charts show the median; ClassiCube runs four rounds alternating the runtimes, so a change in machine load weighs on both. The Soda Direct3D 11 triangle did not finish within its 600-second limit. Software Vulkan keeps the numbers reproducible anywhere; a hardware GPU raises them for every runtime.
 
-All [measured values](docs/benchmarks.json), with CPU time and memory, are published, and `scripts/benchmark-wine.py`, `benchmark-apps.py`, `benchmark-frames.py` and `benchmark-classicube.py` reproduce them.
+The [earlier chart data](docs/benchmarks.json), with CPU time and memory, remains available; its ClassiCube entry is superseded by the table above. The scripts `scripts/benchmark-wine.py`, `benchmark-apps.py`, `benchmark-frames.py` and `benchmark-classicube.py` run these workloads. The ClassiCube runner groups trials by runtime; use separate one-trial runs to alternate runtimes.
 
 ## License
 
