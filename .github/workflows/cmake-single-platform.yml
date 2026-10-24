@@ -1,5 +1,3 @@
-# Builds the native Raven runtime on Linux x86_64, runs the test suite,
-# and publishes the artifacts produced under build/native.
 name: CMake
 
 on:
@@ -13,6 +11,9 @@ on:
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: RelWithDebInfo
+  # MinGW-w64 >= 12.0.0 is required: 11.0.1 (Ubuntu 24.04) lacks
+  # D3D_FEATURE_LEVEL_12_2, which testdata/d3d12/device.c uses.
+  MINGW_W64_VERSION: "14.0.0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -43,6 +44,28 @@ jobs:
           libfreetype-dev libvulkan-dev mesa-vulkan-drivers \
           libssl-dev clang lld
 
+    # Ubuntu 24.04 ships mingw-w64 11.0.1, whose d3dcommon.h predates
+    # D3D_FEATURE_LEVEL_12_2 (added in mingw-w64 12.0.0). testdata/d3d12/*.c
+    # needs it, and provision-fixtures.py compiles with a fixed flag list, so
+    # the headers must be newer rather than the flags different.
+    - name: Install newer MinGW-w64 headers
+      run: |
+        set -eux
+        curl -fsSL -o /tmp/mingw-w64.tar.gz \
+          "https://github.com/mingw-w64/mingw-w64/archive/refs/tags/v${MINGW_W64_VERSION}.tar.gz"
+        tar -xf /tmp/mingw-w64.tar.gz -C /tmp
+        src="/tmp/mingw-w64-${MINGW_W64_VERSION}/mingw-w64-headers"
+        [ -x "${src}/configure" ] || ( cd "${src}" && autoreconf -i )
+        for host in x86_64-w64-mingw32 i686-w64-mingw32; do
+          sysroot="$(${host}-gcc -print-sysroot)"
+          [ -n "${sysroot}" ] || sysroot="/usr/${host}"
+          build="/tmp/mingw-headers-${host}"
+          mkdir -p "${build}"
+          ( cd "${build}" && "${src}/configure" \
+              --host="${host}" --prefix="${sysroot}" --with-default-msvcrt=msvcrt )
+          sudo make -C "${build}" install
+        done
+
     - name: Check the requirements are met
       run: |
         set -eu
@@ -58,9 +81,13 @@ jobs:
         import sys
         assert sys.version_info >= (3, 11), sys.version
         PY
+        # The fixture sources use D3D_FEATURE_LEVEL_12_2; mingw-w64 11.x lacks it.
+        for host in x86_64-w64-mingw32 i686-w64-mingw32; do
+          printf '#include <d3d12.h>\nint probe = D3D_FEATURE_LEVEL_12_2;\n' > /tmp/probe.c
+          "${host}-gcc" -c -o /tmp/probe.o /tmp/probe.c \
+            || { echo "$host headers predate D3D_FEATURE_LEVEL_12_2"; exit 1; }
+        done
 
-    # Configure runs scripts/provision-fixtures.py, which downloads fixtures and
-    # cross-compiles the Windows test programs with MinGW-w64.
     - name: Cache provisioned fixtures
       uses: actions/cache@v4
       with:
@@ -74,13 +101,11 @@ jobs:
     - name: Build
       run: cmake --build build -j2
 
-    # Some tests need software Raven cannot redistribute and skip without it.
     - name: Test
       working-directory: ${{ github.workspace }}/build
       continue-on-error: true
       run: ctest -C ${{ env.BUILD_TYPE }} --output-on-failure -j1
 
-    # The binaries from build/native that a user actually runs.
     - name: Assemble runtime bundle
       run: |
         set -eu
@@ -105,8 +130,6 @@ jobs:
         if-no-files-found: error
         retention-days: 30
 
-    # Everything the build produced under build/native, including the
-    # cross-compiled Windows fixtures.
     - name: Upload full native build output
       uses: actions/upload-artifact@v4
       with:
